@@ -5,6 +5,7 @@ import type { CatalogModel, Price } from '../lib/contracts';
 import { formatDateTime, formatMoneyList, prettyJson } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 import { Link } from '../router';
+import { ModelParameters } from './ModelParameters';
 import {
   Badge,
   Button,
@@ -78,7 +79,7 @@ function capabilities(model: CatalogModel) {
   return items;
 }
 
-function ModelDetail({ model, onClose }: { model: CatalogModel | null; onClose: () => void }) {
+function ModelDetail({ model, onClose, onSaved }: { model: CatalogModel | null; onClose: () => void; onSaved: (model: CatalogModel) => void }) {
   return (
     <Modal
       open={model !== null}
@@ -98,6 +99,8 @@ function ModelDetail({ model, onClose }: { model: CatalogModel | null; onClose: 
             ))}
           </div>
           {!model.enabled && model.disabledReason ? <InlineNote tone="warn">停用原因：{model.disabledReason}</InlineNote> : null}
+
+          <ModelParameters key={model.id} modelId={model.id} onSaved={onSaved} />
 
           <div className="detail-grid">
             <div>
@@ -253,7 +256,7 @@ export function ModelsPage() {
       />
 
       <InlineNote>
-        目录同步失败时服务端保留上一次完整快照；缓存超过 24 小时未成功刷新会暂停受影响模型的新请求。这里是只读目录，不修改上游模型。
+        目录同步失败时服务端保留上一次完整快照；缓存超过 24 小时未成功刷新会暂停受影响模型的新请求。点击模型可编辑本网关的参数覆盖。
       </InlineNote>
 
       {models.error ? <ErrorState error={models.error} onRetry={models.reload} /> : null}
@@ -327,7 +330,7 @@ export function ModelsPage() {
               <span>
                 显示 {filtered.length} / {items.length} 个条目
               </span>
-              {items.length === 0 ? null : <span className="muted">点击模型查看价格、来源与变体。</span>}
+               {items.length === 0 ? null : <span className="muted">点击模型编辑参数，查看价格、来源与变体。</span>}
             </div>
 
             {items.length === 0 && !models.error ? (
@@ -427,7 +430,7 @@ export function ModelsPage() {
         </>
       ) : null}
 
-      <ModelDetail model={selected} onClose={() => setSelected(null)} />
+      <ModelDetail model={selected} onClose={() => setSelected(null)} onSaved={model => { setSelected(current => current?.id === model.id ? model : current); models.reload(); }} />
     </div>
   );
 }

@@ -1,7 +1,7 @@
 # 供应商插件实现说明
 
 日期：2026-11-13
-状态：已实现独立插件包与固定响应测试；**未对真实账号执行认证、付费请求或额度查询**。
+状态：已实现独立插件包与固定响应测试；realseek 已完成本机专用令牌、目录参数和余额同步，**尚未执行真实推理／付费请求**。其余供应商真实认证与额度查询未验收。
 
 本文记录 `packages/providers/**` 的实现依据、凭据字段、行为边界和仍需目标实例验证的事实。产品需求见 `docs/PRD.md`。
 
@@ -30,6 +30,8 @@
 - `discover` 在无法完成关键读取时抛错，让核心保留旧目录；不会用空数组清目录。
 - 未知或不支持的余额、额度、价格返回空值或 `unknown`/`error`，不返回假零。
 - `monitor` 的 `sampledAt` 使用 `ctx.now()`；时间均为 ISO 8601，窗口重置时间来自上游原值。
+- `ProviderModel.available` 表示独立于参数完整度的权限／凭据可用性；false 不允许手工参数恢复。`unknownParameters` 区分未知能力与已知 false。旧插件未提供 available 时，以 enabled 为保守边界。
+- 网关统一参数编辑按完整业务模型 ID 单独存储；插件同步只更新自动快照。覆盖优先级最高，清空后恢复插件自动值（包括原有 `options.modelOverrides`）。当前插件 SDK 只有服务端能力，不支持注册前端页面。
 
 ## 2. realseek / New API 兼容插件
 
@@ -70,10 +72,15 @@
 | `modelOverrides` | 按模型名（或 `group/model`）补全上下文、输出、工具、输入媒体、family、protocol、variants；来源写入 `sources.models` |
 | `modelsDev` | `true` 时才读取 `https://models.dev/api.json`，并要求模型 id 精确且唯一匹配；不覆盖供应商限制 |
 | `modelsDevUrl` / `modelsDevProvider` | 自定义 models.dev 地址或指定 provider id |
+| `modelsDevOfficial` | true 时按 `/api/pricing` 的明确厂商名选择原厂 models.dev provider，要求模型名精确匹配；覆盖 modelsDevProvider 的选择，不回退第三方、不猜别名。仍需 modelsDev=true |
 
 凭据优先级：`secrets["token:<group>"]`（显式）→ 名称匹配 `managedTokenPrefix`/`tokenTemplate` 的管理令牌 → `allowUserTokens=true` 时才使用该分组其它令牌 → `apiKeyGroup` 对应的 `secrets.apiKey`。`model.credentialKey` 写实际使用的 secrets 键（`token:<group>` 或 `apiKey`），`prepare` 按它取凭据。账号 `/api/user/self/groups`（或 `/api/user_group_map`）是分组权限唯一来源；令牌/secret 只提供凭据，不授予分组。
 
 ### 2.3 发现流程
+
+2026-11-13 站点核对：`/api/pricing` 的 若干记录没有上下文、最大输出或工具能力字段。站点模型文档提到详情可展示参数，但抽查 `deepseek-v4-pro` 详情也没有数值，故本版 realseek 用公开资料补缺；不能将文档描述视为站点已提供实际限制。价格始终取站点，公开参数不代表中转分组实际上限，管理员可独立修正分组参数。
+
+原厂映射：OpenAI→openai、Anthropic→anthropic、DeepSeek→deepseek、xAI→xai、Google→google、Moonshot→moonshotai、智谱→zhipuai、阿里巴巴→alibaba-cn、MiniMax→minimax、腾讯→tencent-tokenhub。未知厂商、未匹配模型和 `[c]` 等独立别名均保持待补参数；来源记录为 `models.dev:<provider>/<model>`。
 
 1. 先检查 `secrets.accessToken`；没有则直接返回空目录与警告，不请求公开 `/api/pricing`。
 2. 读取 `/api/status` 得到 `quota_per_unit`（或显式 `options.quotaPerUnit`）。

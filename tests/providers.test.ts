@@ -153,6 +153,36 @@ const pricing = {
   pricing_version: 'p1',
 };
 
+test('realseek: 原厂模式精确匹配、不猜别名、不回退第三方、保留站点价格和配置覆盖', async () => {
+  const facts = { limit: { context: 64000, output: 8000 }, tool_call: true, reasoning: false, modalities: { input: ['text'] }, family: 'gpt', cost: { input: 999 } };
+  const data = { ...pricing, data: [pricing.data[0], { ...pricing.data[0], model_name: 'gpt-test[c]' }, { ...pricing.data[0], model_name: 'third-party-only' }, { ...pricing.data[0], model_name: 'unknown-vendor', vendor_id: 99 }] };
+  const { context } = makeContext(account('realseek', { options: { modelsDev: true, modelsDevOfficial: true, modelsDevProvider: 'thirdparty', modelOverrides: { 'group-d/gpt-test': { context: 32000, tools: false } } } }),
+    { accessToken: 'access-token', userId: '7', 'token:group-c': 'sk-dedicated-a', 'token:group-d': 'sk-dedicated-b' }, url => {
+      if (url.endsWith('/api/status')) return json({ success: true, data: { quota_per_unit: 500000 } });
+      if (url.endsWith('/api/pricing')) return json(data);
+      if (url.endsWith('/api/user/self')) return json({ success: true, data: { id: 7 } });
+      if (url.endsWith('/api/user/self/groups')) return json({ success: true, data: ['group-c', 'group-d'] });
+      if (url.includes('/api/token/?')) return json({ success: true, data: { total: 0, items: [] } });
+      throw new Error(`unexpected ${url}`);
+    });
+  const originalFetch = context.fetch;
+  context.fetch = (async (url, init) => String(url) === 'https://models.dev/api.json'
+    ? json({ openai: { models: { 'gpt-test': facts } }, thirdparty: { models: { 'gpt-test': { ...facts, limit: { context: 999999, output: 8000 } }, 'gpt-test[c]': facts, 'third-party-only': facts, 'unknown-vendor': facts } } })
+    : originalFetch(url, init)) as typeof fetch;
+  const result = await realseek.discover(context);
+  const first = model(result.models, 'group-c/gpt-test');
+  assert.equal(first.limit.context, 64000); assert.equal(first.price.input, 1);
+  assert.match(first.sources!.models!, /models.dev:openai\/gpt-test/);
+  assert.equal(first.available, true); assert.equal(first.enabled, true);
+  assert.equal(model(result.models, 'group-d/gpt-test').limit.context, 32000);
+  assert.equal(model(result.models, 'group-d/gpt-test').capabilities.tools, false);
+  for (const name of ['gpt-test[c]', 'third-party-only', 'unknown-vendor']) {
+    const item = model(result.models, `group-c/${name}`);
+    assert.equal(item.limit.context, null); assert.equal(item.enabled, false);
+    assert.ok(!item.sources!.models!.includes('thirdparty'));
+  }
+});
+
 test("realseek: account permissions, missing params, complex price and credential key", { timeout: 5000 }, async () => {
   const tokens = [{ id: 1, name: 'mine', group: 'group-c', status: 1, key: 'sk-masked****' }];
   const { context, calls, patches } = makeContext(

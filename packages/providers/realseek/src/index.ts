@@ -20,6 +20,11 @@ export { evaluateBillingExpression, parseBillingExpression, UnsupportedExpressio
 const DEFAULT_BASE_URL = 'https://newapi.example.com';
 const DEFAULT_QUOTA_PER_UNIT = 500_000;
 const SOURCE_LABEL = 'New API /api/pricing';
+// 仅按站点明确的厂商名选择原厂目录；不根据模型名前缀猜测或去除别名后缀。
+const OFFICIAL_MODELS_DEV: Record<string, string> = {
+  OpenAI: 'openai', Anthropic: 'anthropic', DeepSeek: 'deepseek', xAI: 'xai', Google: 'google',
+  Moonshot: 'moonshotai', '智谱': 'zhipuai', '阿里巴巴': 'alibaba-cn', MiniMax: 'minimax', '腾讯': 'tencent-tokenhub',
+};
 
 type JsonObject = Record<string, unknown>;
 
@@ -59,6 +64,7 @@ interface ModelFacts {
   output: number | null;
   inputLimit?: number;
   input: Array<'text' | 'image'>;
+  imageInputKnown?: boolean;
   tools: boolean | null;
   reasoning?: boolean;
   family: string;
@@ -317,6 +323,7 @@ function modelsDevFacts(
       context,
       output,
       input: inputModalities.length ? inputModalities : undefined,
+      imageInputKnown: Array.isArray(modalities?.input),
       tools: toolCall,
       reasoning: typeof chosen.model.reasoning === 'boolean' ? chosen.model.reasoning : undefined,
       family: family ?? undefined,
@@ -388,6 +395,7 @@ function modelFacts(
     output,
     ...(inputLimit != null ? { inputLimit } : {}),
     input,
+    imageInputKnown: inputRaw !== undefined || devFacts.imageInputKnown === true,
     tools,
     reasoning,
     family,
@@ -696,7 +704,11 @@ async function discover(context: ProviderContext): Promise<Discovery> {
     const vendorName = vendors.get(asNumber(pricingItem.vendor_id) ?? -1) ?? null;
 
     for (const group of targetGroups) {
-      const facts = modelFacts(modelName, group, vendorName, overrideMap, modelsDevCatalog, modelsDevProvider);
+      const officialOnly = context.account.options.modelsDevOfficial === true;
+      const officialProvider = vendorName ? OFFICIAL_MODELS_DEV[vendorName] : undefined;
+      const facts = modelFacts(modelName, group, vendorName, overrideMap,
+        officialOnly && !officialProvider ? null : modelsDevCatalog,
+        officialOnly ? officialProvider ?? null : modelsDevProvider);
       const protocol = protocolFor(endpointTypes, facts.protocol);
       if (!protocol) {
         warnings.push(`${modelName} (${group}) 的端点 ${endpointTypes.join(', ') || '未知'} 不属于首期协议，已跳过`);
@@ -769,6 +781,12 @@ async function discover(context: ProviderContext): Promise<Discovery> {
         ...(credential ? { credentialKey: credential.secretName } : {}),
         group,
         enabled,
+        available: !!credential,
+        unknownParameters: [
+          ...(facts.tools == null ? ['tools' as const] : []),
+          ...(facts.reasoning == null ? ['reasoning' as const] : []),
+          ...(!facts.imageInputKnown ? ['imageInput' as const] : []),
+        ],
         ...(!enabled ? { disabledReason: reasons.join('；') } : {}),
         sources: {
           pricing: pricingSource,
@@ -785,6 +803,7 @@ async function discover(context: ProviderContext): Promise<Discovery> {
     warnings: warnings.length ? warnings : undefined,
   };
 }
+
 
 function parseGroups(body: unknown): string[] {
   const source = unwrap(body);

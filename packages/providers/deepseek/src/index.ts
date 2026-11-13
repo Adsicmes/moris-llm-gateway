@@ -201,6 +201,8 @@ async function discover(context: ProviderContext): Promise<Discovery> {
         variants: {},
         price: { kind: 'unknown', currency: 'USD', source: MODELS_SOURCE },
         enabled: false,
+        available: true,
+        unknownParameters: ['tools'],
         disabledReason: '插件没有该模型的已核实规格与价格',
         sources: { models: MODELS_SOURCE },
       });

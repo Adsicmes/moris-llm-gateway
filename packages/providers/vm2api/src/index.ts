@@ -273,6 +273,8 @@ async function discover(context: ProviderContext): Promise<Discovery> {
       variants,
       price,
       enabled,
+      available: item.enabled !== false,
+      unknownParameters: tools == null ? ['tools'] : [],
       ...(!enabled ? { disabledReason: reasons.join('；') } : {}),
       sources: {
         models: `${base}/v1/models（按 API key 的 group_type 与 allowed_models 过滤）`,

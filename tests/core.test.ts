@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store, type AttemptRecord } from '../apps/gateway/src/store.js';
 import { Vault } from '../apps/gateway/src/security.js';
 import { estimateCost, estimateWindow, settle, sumMoney } from '../apps/gateway/src/billing.js';
@@ -12,6 +15,59 @@ import type { ProviderAccount, ProviderModel } from '../packages/contracts/src/i
 const key = () => randomBytes(32).toString('base64');
 const account: ProviderAccount = { id: 'account', namespace: 'test', name: '测试', plugin: 'test', baseUrl: 'https://example.test', billingType: 'metered', enabled: true, autoCreateTokens: false, options: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
 const model: ProviderModel = { path: 'group/model', upstreamModel: 'model', name: 'Model', family: 'test', protocol: 'chat-completions', capabilities: { tools: true, input: ['text', 'image'], output: ['text'] }, limit: { context: 128000, output: 8192 }, variants: {}, price: { kind: 'token', currency: 'USD', input: 1, output: 2 } };
+
+test('参数覆盖持久保存、分组隔离、同步保留、恢复自动且不改变TTL', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'moris-parameters-')); const path = join(dir, 'test.sqlite'); const k = key();
+  let store = new Store(path, k);
+  try {
+    store.saveAccount(account);
+    const at = new Date().toISOString();
+    const incomplete: ProviderModel = { ...model, enabled: false, available: true, unknownParameters: ['tools'], limit: { context: null, output: null } };
+    store.replaceCatalog(account, [incomplete, { ...model, path: 'other/model' }], at);
+    store.saveModelParameters('test/group/model', { context: 32000, output: 4000, tools: false, reasoning: false, imageInput: false, name: '手工名称' });
+    assert.equal(store.model('test/group/model')!.enabled, true);
+    assert.equal(store.model('test/group/model')!.syncedAt, at);
+    assert.equal(store.model('test/other/model')!.limit.context, 128000);
+    store.close(); store = new Store(path, k);
+    assert.equal(store.model('test/group/model')!.name, '手工名称');
+    assert.equal(store.model('test/group/model')!.capabilities.tools, false);
+    assert.deepEqual(store.model('test/group/model')!.capabilities.input, ['text']);
+    const revision = store.modelParameters('test/group/model')!.revision;
+    store.replaceCatalog(account, [{ ...model, limit: { context: 64000, output: 8000 } }], at);
+    assert.equal(store.model('test/group/model')!.limit.context, 32000);
+    assert.equal(store.modelParameters('test/group/model')!.automatic.limit.context, 64000);
+    assert.equal(store.modelParameters('test/group/model')!.revision, revision);
+    store.saveModelParameters('test/group/model', {});
+    assert.equal(store.model('test/group/model')!.limit.context, 64000);
+    assert.equal(store.model('test/group/model')!.name, 'Model');
+    assert.equal(store.model('test/group/model')!.capabilities.tools, true);
+    assert.notEqual(store.modelParameters('test/group/model')!.revision, revision);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('参数编辑不能复活删除、上游停用、旧版未知权限、账号停用或过期模型', async () => {
+  const store = new Store(':memory:', key()); const transport = new Transport();
+  try {
+    store.saveAccount(account);
+    const providers = new Providers(store, new ProviderRegistry(), transport);
+    const at = new Date(Date.now() - 25 * 3600000).toISOString();
+    store.replaceCatalog(account, [{ ...model, available: true }], at);
+    store.saveModelParameters('test/group/model', { context: 128000, output: 8192, tools: true });
+    assert.equal(providers.callable(store.model('test/group/model')!), false);
+    assert.equal(store.model('test/group/model')!.syncedAt, at);
+    for (const availability of [{ available: false, enabled: false }, { enabled: false }]) {
+      store.replaceCatalog(account, [{ ...model, ...availability }], new Date().toISOString());
+      assert.equal(store.model('test/group/model')!.enabled, false);
+    }
+    store.replaceCatalog(account, [{ ...model, available: true }], new Date().toISOString());
+    store.saveAccount({ ...account, enabled: false });
+    assert.equal(providers.callable(store.model('test/group/model')!), false);
+    store.saveAccount(account);
+    store.replaceCatalog(account, [], new Date().toISOString());
+    store.saveModelParameters('test/group/model', { context: 128000, output: 8192, tools: true });
+    assert.equal(providers.callable(store.model('test/group/model')!), false);
+  } finally { await transport.close(); store.close(); }
+});
 
 test('秘密使用认证加密，错误主密钥不能解密；设备撤销立即生效', () => {
   const k = key(); const store = new Store(':memory:', k);

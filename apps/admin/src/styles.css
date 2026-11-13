@@ -759,6 +759,15 @@ code {
   background: #141414;
 }
 
+/* 编辑器位于深色弹窗内，控件边界对比度保持至少 3:1。 */
+.model-parameter-form {
+  --p-control-border: #707070;
+}
+
+.model-parameter-form .input:not(:focus):not([aria-invalid="true"]) {
+  border-color: var(--p-control-border);
+}
+
 .textarea {
   height: auto;
   min-height: 84px;

@@ -36,8 +36,27 @@ export interface ProviderModel {
   credentialKey?: string;
   group?: string;
   enabled?: boolean;
+  /** 独立于参数完整度的上游权限／凭据可用性；手工参数不得覆盖 false。 */
+  available?: boolean;
+  unknownParameters?: Array<'tools' | 'reasoning' | 'imageInput'>;
   disabledReason?: string;
   sources?: Record<string, string>;
+}
+export interface ModelParameterOverrides {
+  context?: number;
+  output?: number;
+  input?: number;
+  tools?: boolean;
+  reasoning?: boolean;
+  imageInput?: boolean;
+  name?: string;
+  family?: string;
+}
+export interface ModelParameterState {
+  automatic: CatalogModel;
+  effective: CatalogModel;
+  overrides: ModelParameterOverrides;
+  revision: string | null;
 }
 export interface CatalogModel extends ProviderModel {
   id: string;

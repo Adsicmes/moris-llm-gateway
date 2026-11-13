@@ -677,6 +677,8 @@ async function discover(context: ProviderContext): Promise<Discovery> {
       price: subscriptionPrice(),
       ...(referencePrice ? { referencePrice } : {}),
       enabled,
+      available: true,
+      unknownParameters: tools == null ? ['tools'] : [],
       ...(!enabled ? { disabledReason: reasons.join('；') } : {}),
       sources: {
         models: MODELS_SOURCE,

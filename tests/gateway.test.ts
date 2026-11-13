@@ -85,6 +85,34 @@ test('令牌模板支持长期有效并拒绝负数或小数天数', async () =>
   } finally { await f.close(); }
 });
 
+test('模型参数API校验、并发冲突、认证与CSRF；目录即时生效', async () => {
+  const f = await fixture(fetch);
+  const url = `/api/admin/models/${encodeURIComponent('test/g/m')}/parameters`;
+  try {
+    assert.equal((await f.app.inject({ url, headers: f.headers })).statusCode, 401);
+    assert.equal((await f.app.inject({ method: 'PATCH', url, headers: f.headers, payload: { overrides: {}, revision: null } })).statusCode, 401);
+    const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'a-test-password-only' } });
+    const headers = { cookie: String(login.headers['set-cookie']).split(';')[0]!, 'x-csrf-token': login.json().csrfToken as string };
+    assert.equal((await f.app.inject({ method: 'PATCH', url, headers: { cookie: headers.cookie }, payload: { overrides: {}, revision: null } })).statusCode, 403);
+    const state = (await f.app.inject({ url, headers })).json();
+    assert.equal(state.revision, null);
+    for (const overrides of [{ context: 0 }, { output: -1 }, { input: 1.5 }, { context: '100' }, { context: Number.MAX_SAFE_INTEGER + 1 }, { tools: 'false' }, { name: ' ' }, { protocol: 'messages' }, { output: 10001 }, { input: 10001 }, { context: 500 }]) {
+      const res = await f.app.inject({ method: 'PATCH', url, headers, payload: { overrides, revision: null } });
+      assert.equal(res.statusCode, 400, JSON.stringify(overrides));
+    }
+    const saved = await f.app.inject({ method: 'PATCH', url, headers, payload: { overrides: { context: 12000, tools: false, imageInput: false }, revision: null } });
+    assert.equal(saved.statusCode, 200);
+    assert.equal(saved.json().effective.capabilities.tools, false);
+    assert.equal(saved.json().effective.syncedAt, state.automatic.syncedAt);
+    const catalog = (await f.app.inject({ url: '/api/admin/models', headers })).json();
+    assert.equal(catalog.items[0].limit.context, 12000);
+    assert.equal((await f.app.inject({ method: 'PATCH', url, headers, payload: { overrides: {}, revision: null } })).statusCode, 409);
+    const reset = await f.app.inject({ method: 'PATCH', url, headers, payload: { overrides: {}, revision: saved.json().revision } });
+    assert.equal(reset.statusCode, 200); assert.equal(reset.json().effective.limit.context, 10000);
+    assert.equal((await f.app.inject({ url: '/api/admin/models/missing/parameters', headers })).statusCode, 404);
+  } finally { await f.close(); }
+});
+
 test('只按显式配置回退，完成响应及工具参数原样保留', async () => {
   const models: string[] = [];
   const f = await fixture((async (_url, init) => {

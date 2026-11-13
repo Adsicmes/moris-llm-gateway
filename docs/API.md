@@ -18,6 +18,8 @@
 - `POST /api/admin/providers/:id/oauth/start` → `{verificationUrl,userCode,expiresAt,intervalSeconds}`。插件支持设备授权时可用；设备授权ID仅保存在服务器内存，绑定当前管理员会话。
 - `POST /api/admin/providers/:id/oauth/poll` → `{state:"pending",intervalSeconds,message}` 或 `{state:"complete",accountId,planType?,email?,expiresAt}`。按返回间隔轮询，过期或修改供应商后需重开；凭据加密保存且不返回浏览器。两接口均需CSRF。
 - `GET /api/admin/models` → `{items: CatalogModel[]}` 包含停用条目。
+- `GET /api/admin/models/:id/parameters` → `{automatic,effective,overrides,revision}`；`:id` 是经 URL 编码的完整业务模型 ID（含分组路径）。`automatic` 为插件自动快照，`effective` 为叠加覆盖并检查账号／TTL 后的结果。
+- `PATCH /api/admin/models/:id/parameters` `{overrides,revision}` → 同上。覆盖字段仅允许 `context,input,output`（正安全整数）、`tools,reasoning,imageInput`（布尔）、`name`（1–200 字符）、`family`（1–100 字符）。输入／输出不能超过已知上下文。整份替换 overrides；省略字段恢复其自动值，`{}` 恢复全部自动值。首次 revision 为 null，之后使用读取值；并发修改返回 409。保存立即作用于目录与路由，不更新 syncedAt，不覆盖价格／协议／凭据／上游权限。
 - `GET /api/admin/quota` → `{items: QuotaSummary[]}`。
 - `GET /api/admin/requests?limit=50&offset=0` → `{items:[{id,modelId,deviceId,startedAt,finishedAt,status,attempts,estimatedCost,settledCost,equivalentUsd}],total}`。原币费用字段为Money数组。
 - `GET /api/admin/requests/:id` → `{request,attempts}`，不包含正文或秘密。

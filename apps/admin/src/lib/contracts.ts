@@ -9,6 +9,8 @@ export type {
   CatalogResponse,
   DataState,
   ModelCapabilities,
+  ModelParameterOverrides,
+  ModelParameterState,
   Money,
   Price,
   Protocol,

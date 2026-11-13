@@ -2,7 +2,8 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DEFAULT_SETTINGS, type CatalogModel, type Money, type Price, type ProviderAccount, type ProviderModel, type ProviderMonitor, type Settings, type Usage } from '../../../packages/contracts/src/index.js';
+import { DEFAULT_SETTINGS, type CatalogModel, type ModelParameterOverrides, type ModelParameterState, type Money, type Price, type ProviderAccount, type ProviderModel, type ProviderMonitor, type Settings, type Usage } from '../../../packages/contracts/src/index.js';
+import { resolveModelParameters } from './model-parameters.js';
 import { hashSecret, newSecret, passwordHash, Vault } from './security.js';
 
 export interface RequestRecord {
@@ -111,21 +112,30 @@ export class Store {
       paths.add(model.path);
     }
     this.transaction(() => {
-      for (const old of this.models().filter(m => m.accountId === account.id)) {
-        this.saveModel({ ...old, enabled: false, disabledReason: '上游完整目录已移除该模型，请重新选择' });
+      for (const old of this.automaticModels().filter(m => m.accountId === account.id)) {
+        this.saveModel({ ...old, available: false, enabled: false, disabledReason: '上游完整目录已移除该模型，请重新选择' });
       }
       for (const model of models) {
-        const complete = Number.isFinite(model.limit.context) && Number.isFinite(model.limit.output) && (model.limit.context ?? 0) > 0 && (model.limit.output ?? 0) > 0 && !!model.family;
         this.saveModel({ ...model, id: `${account.namespace}/${model.path}`, accountId: account.id,
-          namespace: account.namespace, billingType: account.billingType, enabled: complete && model.enabled !== false,
-          disabledReason: !complete ? '缺少可信模型参数' : model.disabledReason, syncedAt: at });
+          namespace: account.namespace, billingType: account.billingType, enabled: model.enabled !== false, syncedAt: at });
       }
       this.db.prepare('UPDATE accounts SET sync=? WHERE id=?').run(JSON.stringify({ lastSyncedAt: at, lastAttemptAt: at, error: null }), account.id);
     });
   }
   private saveModel(model: CatalogModel): void { this.db.prepare('INSERT INTO models VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(model.id, model.accountId, JSON.stringify(model)); }
-  models(): CatalogModel[] { return this.db.prepare('SELECT value FROM models ORDER BY id').all().map(row => decode<CatalogModel>(row)!); }
-  model(id: string): CatalogModel | undefined { return decode<CatalogModel>(this.db.prepare('SELECT value FROM models WHERE id=?').get(id)); }
+  private automaticModels(): CatalogModel[] { return this.db.prepare('SELECT value FROM models ORDER BY id').all().map(row => decode<CatalogModel>(row)!); }
+  modelParameters(id: string): ModelParameterState | undefined {
+    const automatic = decode<CatalogModel>(this.db.prepare('SELECT value FROM models WHERE id=?').get(id));
+    if (!automatic) return undefined;
+    const saved = this.getMeta<{ overrides: ModelParameterOverrides; revision: string }>(`model-parameters:${id}`);
+    const overrides = saved?.overrides ?? {};
+    return { automatic, overrides, revision: saved?.revision ?? null, effective: resolveModelParameters(automatic, overrides) };
+  }
+  saveModelParameters(id: string, overrides: ModelParameterOverrides): void {
+    this.setMeta(`model-parameters:${id}`, { overrides, revision: randomUUID() });
+  }
+  models(): CatalogModel[] { return this.automaticModels().map(model => resolveModelParameters(model, this.getMeta<{ overrides: ModelParameterOverrides }>(`model-parameters:${model.id}`)?.overrides ?? {})); }
+  model(id: string): CatalogModel | undefined { return this.modelParameters(id)?.effective; }
   monitor(id: string): ProviderMonitor | undefined { return decode<ProviderMonitor>(this.db.prepare('SELECT value FROM monitors WHERE account_id=?').get(id)); }
   saveMonitor(id: string, monitor: ProviderMonitor): void { this.db.prepare('INSERT INTO monitors VALUES (?,?) ON CONFLICT(account_id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(monitor)); }
   saveRequest(value: RequestRecord): void { this.db.prepare('INSERT INTO requests VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, value.startedAt, JSON.stringify(value)); }

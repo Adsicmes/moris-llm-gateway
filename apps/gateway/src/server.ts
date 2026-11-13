@@ -10,6 +10,7 @@ import { Providers, ProviderRegistry } from './providers.js';
 import { Transport } from './network.js';
 import { safeEqual, verifyPassword } from './security.js';
 import { executeRequest, GatewayError } from './routing.js';
+import { modelParametersSchema, resolveModelParameters } from './model-parameters.js';
 import { sumMoney } from './billing.js';
 import type { DeviceAuthorization } from '../../../packages/provider-sdk/src/index.js';
 
@@ -168,6 +169,26 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     } finally { value.busy = false; }
   });
   app.get('/api/admin/models', async () => ({ items: store.models().map(model => ({ ...model, enabled: providers.callable(model), disabledReason: providers.callable(model) ? undefined : model.disabledReason ?? '目录过期或供应商已停用' })) }));
+  const parameterState = (id: string) => {
+    const state = store.modelParameters(id);
+    if (!state) throw new GatewayError('not_found', '模型不存在', 404);
+    if (!providers.callable(state.effective)) state.effective = { ...state.effective, enabled: false, disabledReason: state.effective.disabledReason ?? '目录过期或供应商已停用' };
+    return state;
+  };
+  app.get('/api/admin/models/:id/parameters', async req => parameterState(idParam(req)));
+  app.patch('/api/admin/models/:id/parameters', async req => {
+    const id = idParam(req);
+    const data = z.object({ overrides: modelParametersSchema, revision: z.string().nullable() }).strict().parse(req.body);
+    const current = parameterState(id);
+    if (current.revision !== data.revision) throw new GatewayError('conflict', '参数已被其他页面修改，请重新读取后再保存', 409);
+    const result = resolveModelParameters(current.automatic, data.overrides);
+    if ((data.overrides.context !== undefined || data.overrides.output !== undefined || data.overrides.input !== undefined) && result.limit.context != null &&
+      ((result.limit.output != null && result.limit.output > result.limit.context) || (result.limit.input != null && result.limit.input > result.limit.context))) {
+      throw new GatewayError('invalid_parameters', '输入上限和最大输出不能超过上下文长度');
+    }
+    store.saveModelParameters(id, data.overrides);
+    return parameterState(id);
+  });
   app.get('/api/admin/quota', async () => ({ items: providers.quotas() }));
   app.get('/api/catalog', async () => providers.catalog());
   app.get('/api/quota', async () => ({ items: providers.quotas() }));
