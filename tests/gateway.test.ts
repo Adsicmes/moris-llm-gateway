@@ -1,0 +1,73 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { createApp } from '../apps/gateway/src/server.js';
+import { Store } from '../apps/gateway/src/store.js';
+import { ProviderRegistry } from '../apps/gateway/src/providers.js';
+import type { ProviderAccount, ProviderModel } from '../packages/contracts/src/index.js';
+
+async function fixture(fetcher: typeof fetch) {
+  const store = new Store(':memory:', randomBytes(32).toString('base64'));
+  store.initializeAdmin('admin', 'a-test-password-only');
+  const account: ProviderAccount = { id: 'a', namespace: 'test', name: '测试', plugin: 'test', baseUrl: 'https://upstream.test', billingType: 'metered', enabled: true, autoCreateTokens: false, options: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const model: ProviderModel = { path: 'g/m', upstreamModel: 'm', name: 'M', family: 'm', protocol: 'chat-completions', capabilities: { tools: true, input: ['text', 'image'], output: ['text'] }, limit: { context: 10000, output: 1000 }, variants: {}, price: { kind: 'token', currency: 'USD', input: 1, output: 2 } };
+  store.saveAccount(account, { apiKey: 'upstream-secret' }); store.replaceCatalog(account, [model], new Date().toISOString());
+  const registry = new ProviderRegistry();
+  registry.register({ id: 'test', name: 'test', discover: async () => ({ complete: true, models: [model] }), prepare: async (ctx, m, body) => ({ url: 'https://upstream.test/v1/chat/completions', headers: { authorization: `Bearer ${ctx.secrets.apiKey}` }, body: { ...body, model: m.upstreamModel } }) });
+  const device = store.createDevice('test');
+  const app = await createApp({ store, registry, fetch: fetcher, secureCookie: false, background: false });
+  return { app, store, headers: { authorization: `Bearer ${device.key}` }, close: async () => { await app.close(); store.close(); } };
+}
+test('临时失败最多三次，每次费用留存，不透传设备密钥', async () => {
+  let calls = 0;
+  const f = await fixture((async (_url, init) => {
+    calls++; assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer upstream-secret');
+    assert.equal(JSON.parse(String(init?.body)).model, 'm');
+    return Response.json({ error: { message: 'private prompt here' }, usage: { prompt_tokens: 100, completion_tokens: 10 } }, { status: 503 });
+  }) as typeof fetch);
+  try {
+    const result = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', messages: [{ role: 'user', content: 'secret prompt' }] } });
+    assert.equal(result.statusCode, 503); assert.equal(calls, 3); assert.equal(f.store.attempts().length, 3);
+    assert.equal(f.store.requests().length, 1); assert.ok(f.store.attempts().every(a => a.estimatedCost !== null));
+    assert.ok(!JSON.stringify(f.store.attempts()).includes('secret prompt')); assert.ok(!result.body.includes('private prompt'));
+  } finally { await f.close(); }
+});
+test('认证错误不重试，未知用量保持null', async () => {
+  let calls = 0; const f = await fixture((async () => { calls++; return Response.json({ error: 'invalid key' }, { status: 401 }); }) as typeof fetch);
+  try {
+    const res = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m' } });
+    assert.equal(res.statusCode, 502); assert.equal(calls, 1); assert.equal(f.store.attempts()[0]!.estimatedCost, null);
+  } finally { await f.close(); }
+});
+test('有效流输出后中断不重放，正常完整流保留usage', async () => {
+  let calls = 0; const f = await fixture((async () => { calls++; return new Response('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n', { headers: { 'content-type': 'text/event-stream' } }); }) as typeof fetch);
+  try {
+    const res = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', stream: true } });
+    assert.equal(calls, 1); assert.match(res.body, /hello/); assert.match(res.body, /upstream_interrupted/);
+    assert.equal(f.store.requests()[0]?.status, 'interrupted');
+  } finally { await f.close(); }
+});
+test('设备key不能管理；cookie管理写入必须CSRF；凭据不回传', async () => {
+  const f = await fixture(fetch);
+  try {
+    assert.equal((await f.app.inject({ url: '/api/admin/providers', headers: f.headers })).statusCode, 401);
+    const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'a-test-password-only' } });
+    assert.equal(login.statusCode, 200);
+    const cookie = String(login.headers['set-cookie']).split(';')[0]!; const csrf = login.json().csrfToken as string;
+    assert.equal((await f.app.inject({ method: 'POST', url: '/api/admin/devices', headers: { cookie }, payload: { name: 'new' } })).statusCode, 403);
+    const create = await f.app.inject({ method: 'POST', url: '/api/admin/devices', headers: { cookie, 'x-csrf-token': csrf }, payload: { name: 'new' } });
+    assert.equal(create.statusCode, 200); assert.match(create.json().key, /^moris_/);
+    const list = await f.app.inject({ url: '/api/admin/providers', headers: { cookie } }); assert.ok(!list.body.includes('upstream-secret'));
+    const patch = await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers: { cookie, 'x-csrf-token': csrf }, payload: { proxyUrl: 'http://user:private-password@localhost:7890' } });
+    assert.equal(patch.statusCode, 200); assert.ok(!patch.body.includes('private-password')); assert.match(f.store.secrets('a').__proxyUrl!, /private-password/);
+  } finally { await f.close(); }
+});
+test('协议不匹配和过期目录在发出上游前拒绝', async () => {
+  let calls = 0; const f = await fixture((async () => { calls++; throw new Error('should not call'); }) as typeof fetch);
+  try {
+    assert.equal((await f.app.inject({ method: 'POST', url: '/v1/responses', headers: f.headers, payload: { model: 'test/g/m' } })).statusCode, 400);
+    f.store.saveSettings({ ...f.store.settings(), catalogTtlMs: 1 }); await new Promise(r => setTimeout(r, 5));
+    assert.equal((await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m' } })).statusCode, 503);
+    assert.equal(calls, 0);
+  } finally { await f.close(); }
+});
