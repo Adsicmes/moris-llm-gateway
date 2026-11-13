@@ -303,6 +303,46 @@ test("realseek: public pricing alone is not an account catalog and token paginat
   await assert.rejects(() => realseek.discover(context), /page failed|HTTP 500/);
 });
 
+test('realseek: moris-only configuration creates unlimited permanent keys without using other tokens', { timeout: 5000 }, async () => {
+  const tokens = [{ id: 1, name: 'personal', group: 'group-c', status: 1, key: 'private-existing-key-must-not-be-used' }];
+  const posts: Record<string, unknown>[] = [];
+  const { context, calls } = makeContext(account('realseek', {
+    autoCreateTokens: true,
+    tokenTemplate: { namePrefix: 'moris', quota: 0, unlimited: true, expiresInDays: 0 },
+    options: { managedTokenPrefix: 'moris', allowUserTokens: false, modelOverrides: { 'gpt-test': { context: 200_000, output: 8192, tools: true } } },
+  }), { accessToken: 'account-access', userId: '7' }, (url, init) => {
+    if (url.endsWith('/api/status')) return json({ success: true, data: { quota_per_unit: 500_000 } });
+    if (url.endsWith('/api/pricing')) return json(pricing);
+    if (url.endsWith('/api/user/self')) return json({ success: true, data: { id: 7 } });
+    if (url.endsWith('/api/user/self/groups')) return json({ success: true, data: ['group-c', 'group-d', 'images-only'] });
+    if (url.includes('/api/token/?')) return json({ success: true, data: { total: tokens.length, items: tokens } });
+    if (url.endsWith('/api/token/') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)); posts.push(body);
+      assert.match(body.name, /^moris-/); assert.equal(body.unlimited_quota, true); assert.equal(body.expired_time, -1); assert.equal(body.remain_quota, 0);
+      assert.notEqual(body.group, 'images-only');
+      tokens.push({ id: tokens.length + 1, name: body.name, group: body.group, status: 1, key: 'sk-masked****' });
+      return json({ success: true });
+    }
+    const keyMatch = url.match(/\/api\/token\/(\d+)\/key$/);
+    if (keyMatch) {
+      assert.equal(init.method, 'POST', 'New API requires POST to reveal a key');
+      const token = tokens.find(item => item.id === Number(keyMatch[1]));
+      assert.ok(token);
+      assert.ok(token.name.startsWith('moris-'), 'never reveal another token');
+      return json({ success: true, data: { key: `dedicated-moris-key-${token.group}` } });
+    }
+    throw new Error('unexpected call; existing token key must not be revealed');
+  });
+  const discovery = await realseek.discover(context);
+  assert.equal(posts.length, 2);
+  assert.equal(context.secrets['token:group-c'], 'dedicated-moris-key-group-c');
+  const prepared = await realseek.prepare(context, model(discovery.models, 'group-c/gpt-test'), {}, 'chat-completions');
+  assert.equal(prepared.headers.Authorization, 'Bearer dedicated-moris-key-group-c');
+  await realseek.discover(context);
+  assert.equal(posts.length, 2, 'second discovery reuses the dedicated tokens');
+  assert.ok(calls.every(call => !['PUT', 'DELETE'].includes(call.init.method ?? 'GET')));
+});
+
 test("realseek: autoCreateTokens with incomplete template fails discovery instead of inventing values", { timeout: 5000 }, async () => {
   const { context } = makeContext(
     account('realseek', {

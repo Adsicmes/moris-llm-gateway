@@ -230,6 +230,7 @@ async function revealTokenKey(context: ProviderContext, secrets: Record<string, 
   if (token.key && !/[*…]/.test(token.key) && token.key.length >= 20) return token.key;
   try {
     const body = await fetchJson(context, `${rootUrl(context.account.baseUrl)}/api/token/${token.id}/key`, {
+      method: 'POST',
       headers: managementHeaders(secrets),
     });
     const data = asObject(unwrap(body));
@@ -623,6 +624,8 @@ async function discover(context: ProviderContext): Promise<Discovery> {
     if (apiKeyGroup && secrets.apiKey) existingSecretGroups.add(apiKeyGroup);
     const created: string[] = [];
     for (const group of usableGroups) {
+      // 首期仅为具有受支持推理端点的分组创建令牌，不为纯生图／视频分组创建。
+      if (!pricingItems.some(item => asArray(item.enable_groups).includes(group) && protocolFor(asArray(item.supported_endpoint_types)))) continue;
       if (tokenByGroup.has(group) || existingSecretGroups.has(group)) continue;
       const name = tokenName(template, group);
       const sameName = byName.get(name);

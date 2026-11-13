@@ -72,6 +72,19 @@ test('协议不匹配和过期目录在发出上游前拒绝', async () => {
   } finally { await f.close(); }
 });
 
+test('令牌模板支持长期有效并拒绝负数或小数天数', async () => {
+  const f = await fixture(fetch);
+  try {
+    const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'a-test-password-only' } });
+    const headers = { cookie: String(login.headers['set-cookie']).split(';')[0]!, 'x-csrf-token': login.json().csrfToken as string };
+    for (const days of [0, -1, 0.5]) {
+      const result = await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { autoCreateTokens: true, tokenTemplate: { namePrefix: 'moris', quota: 0, unlimited: true, expiresInDays: days } } });
+      assert.equal(result.statusCode, days === 0 ? 200 : 400);
+    }
+    assert.equal(f.store.account('a')?.tokenTemplate?.expiresInDays, 0);
+  } finally { await f.close(); }
+});
+
 test('只按显式配置回退，完成响应及工具参数原样保留', async () => {
   const models: string[] = [];
   const f = await fixture((async (_url, init) => {

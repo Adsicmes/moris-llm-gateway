@@ -181,8 +181,8 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
       if (!token.unlimited && token.quota.trim() === '') nextErrors['token.quota'] = '填写额度，或勾选「不限额」。';
       if (!Number.isFinite(quotaNumber) || quotaNumber < 0) nextErrors['token.quota'] = '额度必须是不小于 0 的数字。';
       if (token.expires.trim() === '') nextErrors['token.expires'] = '填写有效天数。';
-      if (!Number.isFinite(expiresNumber) || expiresNumber < 1 || expiresNumber > 3650) {
-        nextErrors['token.expires'] = '有效天数必须是 1 到 3650 的整数。';
+      if (!Number.isInteger(expiresNumber) || expiresNumber < 0 || expiresNumber > 3650) {
+        nextErrors['token.expires'] = '有效天数必须是 0 到 3650 的整数；0 表示长期有效。';
       }
     }
 
@@ -545,11 +545,11 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     aria-invalid={Boolean(errors['token.quota'])}
                   />
                 </Field>
-                <Field label="有效天数" id="token-expires" error={errors['token.expires']} hint="1–3650 天；令牌到期后上游会拒绝调用。">
+                <Field label="有效天数" id="token-expires" error={errors['token.expires']} hint="0 表示长期有效；也可填写 1–3650 天。">
                   <Input
                     id="token-expires"
                     type="number"
-                    min="1"
+                    min="0"
                     max="3650"
                     step="1"
                     value={token.expires}

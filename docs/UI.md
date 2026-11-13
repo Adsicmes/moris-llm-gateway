@@ -110,7 +110,7 @@ npm run typecheck --workspace=@moris/admin
 - 新建：`POST /api/admin/providers`，字段严格为 `namespace,name,plugin,baseUrl,billingType,enabled,proxyUrl,autoCreateTokens,tokenTemplate,options,secrets`。
 - 编辑：`PATCH /api/admin/providers/:id`；**不提交 `namespace` 与 `plugin`**（服务端将其视为不可变）。`proxyUrl` 仅在值与回显值不同时提交；清空并保存会发送空字符串以移除代理。未改动时完全省略该字段，避免擦除服务端保存的代理认证信息。
 - 密钥：列表绝不回显 secrets。新增/替换按 `{key: value}` 提交；勾选“删除”的键以 `{key: ""}` 提交。未填写的键不提交。
-- 自动令牌：默认关闭；模板完整（名称前缀、额度、1–3650 天有效期）才提交。`unlimited` 可选，额度按 0 提交；不会猜测或隐式开启。
+- 自动令牌：默认关闭；模板完整（名称前缀、额度、0–3650 整数天有效期，0 表示长期有效）才提交。`unlimited` 可选，额度按 0 提交；不会猜测或隐式开启。
 - `options` 必须是 JSON 对象；无效 JSON 在客户端阻止提交。
 - 同步：`POST /api/admin/providers/:id/sync`，展示返回的 `state` 与 `error`；失败保留旧快照。
 - 停用：`DELETE /api/admin/providers/:id`（软停用）。确认文案说明历史与在途请求不被删除/主动打断。

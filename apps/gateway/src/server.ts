@@ -15,7 +15,7 @@ import type { DeviceAuthorization } from '../../../packages/provider-sdk/src/ind
 
 const urlSchema = z.string().url().refine(v => ['http:', 'https:'].includes(new URL(v).protocol) && !new URL(v).username && !new URL(v).password, '需要不含凭据的HTTP(S)地址');
 const proxySchema = z.string().refine(v => { try { return v === '' || ['http:', 'https:', 'socks5:', 'socks5h:'].includes(new URL(v).protocol); } catch { return false; } }, '代理URL无效');
-const tokenTemplate = z.object({ namePrefix: z.string().min(1).max(64), quota: z.number().finite().nonnegative(), expiresInDays: z.number().int().positive().max(3650), unlimited: z.boolean().optional() });
+const tokenTemplate = z.object({ namePrefix: z.string().min(1).max(64), quota: z.number().finite().nonnegative(), expiresInDays: z.number().int().nonnegative().max(3650), unlimited: z.boolean().optional() });
 const accountSchema = z.object({
   namespace: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().min(1).max(100),
   plugin: z.string().min(1).max(100), baseUrl: urlSchema,

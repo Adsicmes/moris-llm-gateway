@@ -44,7 +44,7 @@
 
 - `controller/pricing.go`：`/api/pricing` 会按登录用户可用分组过滤；未认证请求不是账号权限目录。
 - `common/page_info.go`：令牌分页为 `{page,page_size,total,items}`，支持 `p`、`size`。
-- `controller/token.go`：`GET /api/token/?p=&size=`、`GET /api/token/:id/key`、`POST /api/token/`；新增令牌字段 `name`、`unlimited_quota`、`expired_time`、`remain_quota`、`allow_ips`、`model_limits_enabled`、`model_limits`、`group`、`cross_group_retry`。
+- `router/api-router.go` 与 `controller/token.go`：`GET /api/token/?p=&size=`、`POST /api/token/:id/key`、`POST /api/token/`；新增令牌字段 `name`、`unlimited_quota`、`expired_time`、`remain_quota`、`allow_ips`、`model_limits_enabled`、`model_limits`、`group`、`cross_group_retry`。2026-11-13 实测修正取钥方法：GET 返回 404，POST 返回完整 key。
 - `model/pricing.go`、`setting/ratio_setting/model_ratio.go`：倍率价格换算与分组倍率。
 - `pkg/billingexpr/expr.md`：`tiered_expr` 系数是真实 `$/1M tokens`；`fixed(n)` 是每请求美元价；支持 `p/c/cr/cc/cc1h/cc12h/len`、`tier()`、`param()`、时间函数等。
 
@@ -120,10 +120,11 @@ perRequest = model_price * group_ratio
 - 令牌名：`${namePrefix}-${group}`，最多 50 字符。
 - `quota` 按 USD 解释，创建时转换为 `remain_quota = round(quota * quota_per_unit)`；`unlimited=true` 时 `remain_quota=0`。
 - `expiresInDays=0` 写入 `expired_time=-1`（永不过期）；否则为当前时间加天数。
+- 后台与管理 API 接受 0–3650 整数天，拒绝负数和小数；不为只有未支持端点的分组创建令牌。
 - 先按 `name + group` 复用已有令牌；同名不同分组时跳过并警告，避免修改用户令牌。同名但已禁用的令牌不复用、也不创建同名替代，记录警告等待人工处理。
 - 已显式配置 `secrets["token:<group>"]` 时优先使用它，不读取/覆盖该分组的管理令牌或用户令牌。
 - 未显式配置时，只选名称匹配 `managedTokenPrefix`/`tokenTemplate` 的管理令牌；其它用户令牌仅在 `options.allowUserTokens=true` 时使用。
-- 只 `POST /api/token/`，不调用 `PUT`/`DELETE`；创建后重新分页读取并通过 `GET /api/token/:id/key` 取回完整 key。
+- 创建使用 `POST /api/token/`，不调用 `PUT`/`DELETE`；创建后重新分页读取并通过 `POST /api/token/:id/key` 取回完整 key。
 - 新 key 通过 `ctx.updateSecrets({ "token:<group>": key })` 增量持久化。
 
 ### 2.6 余额与限制
@@ -138,6 +139,14 @@ perRequest = model_price * group_ratio
 - `pricing_version` 是否随价格更新，历史账本需自行保存版本快照。
 - 目标站点的 `quota_per_unit` 是否始终为 500000；插件不硬编码该值。
 - models.dev 对目标模型是否精确唯一匹配；否则必须用 `modelOverrides`。
+
+### 2.7 首次本机接入证据（2026-11-13）
+
+- 已验证账号权限：若干可用分组、若干价格记录。原有 其余非 moris 令牌未取钥、未使用、未修改或删除。
+- 为支持推理的分组创建 `moris-分组名`，不限额、长期有效；取钥方法修正后复用全部令牌，新增数量为 0。全部 API Key 已通过 Store 加密保存。
+- 本账号设置 `managedTokenPrefix=moris`、`allowUserTokens=false`，不注入手工 `apiKey`，仅保存经专用令牌列表核验的分组 key。
+- 余额监控返回 `ok`；完整同步 全部分组模型路径。目前可调用 0 条，均因缺少可信模型参数停用。`modelsDev=true` 不会在多个同名供应商条目间自行选择；需要指定来源或提供有证据的 `modelOverrides`。
+- 未发起模型调用；真实响应、SSE、工具调用及扣费仍待验收。Gemini 原生端点及纯生图／视频分组不在本次创建范围。
 
 ## 3. DeepSeek 官方插件
 
