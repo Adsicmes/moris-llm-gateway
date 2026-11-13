@@ -33,3 +33,12 @@
 - OpenAI 管理员设备授权实现会话绑定、轮询间隔、到期检查和加密保存；Responses 非流式请求可聚合仅 SSE 的上游完成事件，保留工具与用量。
 - 后台实际录入发现账单查询 JSON 路径错误，修正 `$.paidAt` 并新增排序与退款回归。
 - 检查：供应商 16 项、OAuth 6 项定向测试通过；统一 `mise exec -- npm run check` 的 74 项测试、根类型检查与全部构建通过。真实供应商授权、扣费和目录尚未验证。
+- Git：`71b4ed8`。
+
+## 2026-11-13 · 阶段五：OpenCode 与 Work Status 客户端
+
+- OpenCode 仅维护 `moris`，按模型选用三协议运行时，禁用本网关自动重试与 WebSocket；目录首启重放、刷新异常、完整目录删除、地址与超时更新已修正。
+- 用户确认不可表达价格保留调用：`cost: []` 与“价格见网关”；接受宿主汇总可能显示 0，以网关账本为准，缺失缓存价格不补造。
+- OpenChamber 使用原生 `statusSection.source` 和 host service，无独立页面；按 directory 隔离最多 32 个缓存，60 秒 single-flight，保留无样本 unknown 账户。
+- 主模型复核客户端，28 项测试通过；真实 SDK schema、manifest、fake context、loopback service 检查通过，构建产物保留在各包 `build/` 供本地安装。
+- 目标 OpenCode/OpenChamber 宿主尚未安装运行，不能将 SDK 契约检查作为宿主验收。
