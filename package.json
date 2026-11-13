@@ -1,0 +1,31 @@
+{
+  "name": "moris-llm-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*", "packages/providers/*"],
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "dev": "tsx apps/gateway/src/main.ts",
+    "start": "node dist/apps/gateway/src/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "admin:dev": "npm run dev --workspace=@moris/admin",
+    "admin:build": "npm run build --workspace=@moris/admin"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/static": "^8.3.0",
+    "fastify": "5.12.8",
+    "undici": "^7.16.0",
+    "socks": "^2.8.7",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

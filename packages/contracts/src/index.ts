@@ -1,0 +1,145 @@
+export const PROVIDER_ID = 'moris' as const;
+export type Protocol = 'chat-completions' | 'responses' | 'messages';
+export type BillingType = 'subscription' | 'metered';
+export type DataState = 'ok' | 'unknown' | 'stale' | 'error' | 'unsupported';
+export interface Price {
+  kind: 'token' | 'request' | 'complex' | 'unknown';
+  currency: 'USD' | 'CNY';
+  /** 每百万token的原币金额，不含缓存读取/写入部分。 */
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  perRequest?: number;
+  expression?: string;
+  source?: string;
+  version?: string;
+}
+export interface ModelCapabilities {
+  tools: boolean;
+  input: Array<'text' | 'image'>;
+  output: Array<'text'>;
+  reasoning?: boolean;
+}
+export interface ProviderModel {
+  path: string;
+  upstreamModel: string;
+  name: string;
+  family: string;
+  protocol: Protocol;
+  capabilities: ModelCapabilities;
+  limit: { context: number | null; output: number | null; input?: number };
+  variants: Record<string, Record<string, unknown>>;
+  price: Price;
+  referencePrice?: Price;
+  /** secrets 中的推理凭据键，由插件定义。 */
+  credentialKey?: string;
+  group?: string;
+  enabled?: boolean;
+  disabledReason?: string;
+  sources?: Record<string, string>;
+}
+export interface CatalogModel extends ProviderModel {
+  id: string;
+  accountId: string;
+  namespace: string;
+  billingType: BillingType;
+  enabled: boolean;
+  syncedAt: string;
+}
+export interface TokenTemplate {
+  namePrefix: string;
+  quota: number;
+  expiresInDays: number;
+  unlimited?: boolean;
+}
+export interface ProviderAccount {
+  id: string;
+  namespace: string;
+  name: string;
+  plugin: string;
+  baseUrl: string;
+  billingType: BillingType;
+  enabled: boolean;
+  proxyUrl?: string;
+  autoCreateTokens: boolean;
+  tokenTemplate?: TokenTemplate;
+  options: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface Balance {
+  currency: string;
+  amount: number;
+  unit?: string;
+}
+export interface QuotaWindow {
+  id: string;
+  name: string;
+  pool: string;
+  startsAt: string;
+  resetsAt: string;
+  usedRatio: number;
+  sampledAt: string;
+}
+export interface ProviderMonitor {
+  state: DataState;
+  balances: Balance[];
+  windows: QuotaWindow[];
+  sampledAt: string;
+  message?: string;
+  planPrice?: { amount: number; currency: string; source: string };
+}
+export interface Usage {
+  input: number;
+  output: number;
+  /** input包含缓存tokens；cacheWrite和cacheRead不得再次按普通输入价计算。 */
+  cacheRead: number;
+  cacheWrite: number;
+}
+export interface Money { amount: number; currency: 'USD' | 'CNY' }
+export interface WindowEstimate {
+  windowId: string;
+  state: 'ok' | 'unavailable';
+  totalUsd?: number;
+  remainingUsd?: number;
+  spentUsd?: number;
+  reason?: string;
+  sampledAt: string;
+  label: string;
+}
+export interface QuotaSummary {
+  accountId: string;
+  name: string;
+  namespace: string;
+  monitor: ProviderMonitor;
+  estimates: WindowEstimate[];
+}
+export interface CatalogResponse {
+  providerID: 'moris';
+  fetchedAt: string;
+  models: CatalogModel[];
+  accounts: Array<{ id: string; lastSyncedAt: string | null; state: DataState; error?: string }>;
+}
+export interface Settings {
+  catalogRefreshMs: number;
+  monitorRefreshMs: number;
+  catalogTtlMs: number;
+  balanceStaleMs: number;
+  maxAttempts: number;
+  connectTimeoutMs: number;
+  firstEventTimeoutMs: number;
+  idleTimeoutMs: number;
+  requestTimeoutMs: number;
+  usdCny: number | null;
+  minEstimateRatio: number;
+  timezone: 'Asia/Shanghai';
+  fallback: Record<string, string[]>;
+}
+export const DEFAULT_SETTINGS: Settings = {
+  catalogRefreshMs: 900_000, monitorRefreshMs: 120_000,
+  catalogTtlMs: 86_400_000, balanceStaleMs: 360_000,
+  maxAttempts: 3, connectTimeoutMs: 15_000, firstEventTimeoutMs: 120_000,
+  idleTimeoutMs: 90_000, requestTimeoutMs: 900_000,
+  usdCny: null, minEstimateRatio: 0.05, timezone: 'Asia/Shanghai', fallback: {},
+};
