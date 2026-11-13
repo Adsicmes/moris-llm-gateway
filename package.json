@@ -6,18 +6,23 @@
   "workspaces": ["apps/*", "packages/*", "packages/providers/*"],
   "engines": { "node": ">=24.0.0" },
   "scripts": {
-    "dev": "tsx apps/gateway/src/main.ts",
-    "start": "node dist/apps/gateway/src/main.js",
-    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx --env-file-if-exists=.env apps/gateway/src/main.ts",
+    "start": "node --env-file-if-exists=.env dist/apps/gateway/src/main.js",
+    "build": "npm run build:server && npm run build:providers && npm run admin:build && npm run build:clients",
+    "build:server": "tsc -p tsconfig.build.json",
+    "build:providers": "node scripts/build-providers.mjs",
+    "build:clients": "npm run build --workspace=@moris/opencode-plugin --if-present && npm run build --workspace=@moris/openchamber-plugin --if-present",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "admin:dev": "npm run dev --workspace=@moris/admin",
-    "admin:build": "npm run build --workspace=@moris/admin"
+    "admin:build": "npm run build --workspace=@moris/admin",
+    "backup": "tsx --env-file-if-exists=.env scripts/backup.ts",
+    "restore": "tsx --env-file-if-exists=.env scripts/restore.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
-    "@fastify/static": "^8.3.0",
+    "@fastify/static": "10.1.10",
     "fastify": "5.12.8",
     "undici": "^7.16.0",
     "socks": "^2.8.7",
@@ -25,6 +30,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }

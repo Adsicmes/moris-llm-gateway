@@ -288,7 +288,7 @@ import { runBackup } from '../../../scripts/backup.js';
 
 从 `apps/gateway/src/main.ts` 出发：`src` → `gateway` → `apps` → 仓库根，再进 `scripts/backup.js`，即 `../../../scripts/backup.js`；编译后在 `dist/apps/gateway/src/main.js` 出发也是同样的 `../../../`。不要写成 `../../../../`。
 
-建议在主进程每天 03:00（Asia/Shanghai）调用一次，捕获并记录错误，不让备份失败拖垮网关。主模型尚未把该 timer 接入时，使用下面的宿主 cron。
+主进程已接入每日备份：启动后及每 60 秒检查北京时间日期，当日未成功备份则执行，成功后记录 `lastBackupDay`；失败记录脱敏错误并允许后续重试。它不固定在 03:00。下面的宿主 cron 是独立调度示例，不需要与内置调度同时启用。
 
 ### 8.3 备选：宿主 cron 调用容器内脚本
 
@@ -484,7 +484,7 @@ docker compose -f deploy/compose.yml up -d --no-build
 
 - 真实域名、DNS、Caddy 站点配置未提供，公网部署未执行。
 - Docker 镜像未构建；`docker compose config` 未运行。
-- `apps/gateway/src/main.ts` 尚未落地，启动、优雅关闭、静态托管与首次登录未端到端验证。
-- 主进程内备份 timer 尚未接入；当前可用宿主 cron 兜底。
+- `apps/gateway/src/main.ts` 已落地，本地临时服务启动、静态托管、首次登录和账单读写已验证；生产 SIGTERM 与卷权限仍待容器环境验证。
+- 主进程备份 timer 已接入，临时服务日志已观察到 `backup_completed`；跨日调度与生产恢复演练仍待实测。
 - 应用 14 天日志保留由主模型实现，本文只描述其与 Docker 日志的区别。
 - 真实供应商代理链路、OpenAI 订阅授权、realseek / vm2api / DeepSeek 账号行为未验证。

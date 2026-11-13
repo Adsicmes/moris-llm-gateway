@@ -42,3 +42,22 @@
 - OpenChamber 使用原生 `statusSection.source` 和 host service，无独立页面；按 directory 隔离最多 32 个缓存，60 秒 single-flight，保留无样本 unknown 账户。
 - 主模型复核客户端，28 项测试通过；真实 SDK schema、manifest、fake context、loopback service 检查通过，构建产物保留在各包 `build/` 供本地安装。
 - 目标 OpenCode/OpenChamber 宿主尚未安装运行，不能将 SDK 契约检查作为宿主验收。
+- Git：`06281f2`。
+
+## 2026-11-13 · 阶段六：后台、启动与交付收尾
+
+- React 后台、四插件启动、可信外部包、每日备份、14 天日志及根 workspace/build/lockfile 完成整合。详细入口见 README。
+- 主模型使用最新编译服务及临时数据库，通过 Tabbit 验证登录、创建停用供应商、保存 -20 CNY 退款和净额；运行日志确认首次备份成功。
+- 最终查看 1440／390／320 截图；修复手机关闭导航仍可 Tab 聚焦屏幕外链接的问题，并改用 rem 根字号。定向键盘复验通过，桌面导航仍可用。
+- `better-interface` 最终报告见 `docs/UI.md` 第 10 节：已检查范围内 HIGH 已修复；屏幕阅读器、200% 缩放、真实有数据上游页面等未验证事项明确保留。
+- 统一 `mise exec -- npm run check`：74/74 测试、根类型检查与全部构建通过。最后 CSS 改动后仅重跑 `mise exec -- npm run admin:build` 和受影响导航浏览器流程，均通过。
+- README、IMPLEMENTATION、UI、deployment 已同步；没有真实账号／宿主／Docker 验收声明。
+- 临时服务 PID 43836 已停止，Tabbit `Moris后台验收` 已 finish；测试数据留在批准的临时目录，不进入仓库。
+- 阶段六提交主题：`feat(admin): stage 6 console, runtime and verified delivery`（本记录随该提交入库，可用 Git 日志定位）。
+
+## 下一阶段：真实接入
+
+- realseek、DeepSeek、vm2api、第二 New API 实例及 OpenAI 授权的真实账号资料待提供。
+- 真实 OpenCode／OpenChamber 插件安装与三设备联用待验证；当前 SDK 检查不替代宿主验收。
+- Docker daemon 不可用；镜像、Compose、Caddy、生产代理与恢复演练待执行。
+- 项目待办已登记；详细验收证据要求见 `IMPLEMENTATION.md` V-01～V-13。
