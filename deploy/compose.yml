@@ -1,0 +1,58 @@
+name: moris-gateway
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: moris-gateway:local
+    container_name: moris-gateway
+    restart: unless-stopped
+
+    # 让 Node 作为子进程接收信号，配合应用自身的优雅关闭。
+    init: true
+    stop_grace_period: 30s
+
+    env_file:
+      - ../.env
+
+    # 只绑定宿主回环地址，由宿主上现有的 Caddy 反代；不在此启动第二套 Caddy。
+    ports:
+      - "127.0.0.1:8787:8787"
+
+    volumes:
+      - moris-data:/app/data
+      - moris-backups:/app/backups
+
+    # Linux 上让容器通过宿主 Clash 代理访问外网；仅为提供主机名，
+    # 不写入任何代理地址，代理仍由每个供应商的 proxyUrl 字段配置。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # 仅约束 Docker 捕获的 stdout/stderr，保留量与应用的 14 天日志是两件事。
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # 健康检查同时验证HTTP处理与数据库连接。
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  moris-data:
+  moris-backups:

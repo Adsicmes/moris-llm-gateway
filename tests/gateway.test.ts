@@ -71,3 +71,39 @@ test('协议不匹配和过期目录在发出上游前拒绝', async () => {
     assert.equal(calls, 0);
   } finally { await f.close(); }
 });
+
+test('只按显式配置回退，完成响应及工具参数原样保留', async () => {
+  const models: string[] = [];
+  const f = await fixture((async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); models.push(body.model);
+    if (body.model === 'm') return Response.json({ error: {} }, { status: 503 });
+    assert.deepEqual(body.tools, [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }]);
+    return Response.json({ id: 'up-ok', choices: [{ message: { role: 'assistant', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] } }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+  }) as typeof fetch);
+  try {
+    const original = f.store.models()[0]!;
+    f.store.replaceCatalog(f.store.account('a')!, [original, { ...original, path: 'other/m', upstreamModel: 'other' }], new Date().toISOString());
+    f.store.saveSettings({ ...f.store.settings(), fallback: { 'test/g/m': ['test/other/m'] } });
+    const result = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', tools: [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }] } });
+    assert.equal(result.statusCode, 200); assert.deepEqual(models, ['m', 'other']);
+    assert.equal(result.json().choices[0].message.tool_calls[0].id, 'call_1');
+    assert.equal(f.store.attempts()[1]?.modelId, 'test/other/m');
+    assert.equal(f.store.requests()[0]?.status, 'succeeded');
+  } finally { await f.close(); }
+});
+
+test('完整SSE流成功终止并结算usage，订阅费用与等价值分开', async () => {
+  const f = await fixture((async () => new Response([
+    'data: {"id":"up","choices":[{"delta":{"content":"ok"}}]}',
+    'data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":10}}',
+    'data: [DONE]', '',
+  ].join('\n\n'), { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch);
+  try {
+    f.store.saveAccount({ ...f.store.account('a')!, billingType: 'subscription' });
+    const result = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', stream: true } });
+    assert.match(result.body, /\[DONE\]/); assert.equal(f.store.requests()[0]?.status, 'succeeded');
+    assert.deepEqual(f.store.attempts()[0]?.usage, { input: 100, output: 10, cacheRead: 0, cacheWrite: 0 });
+    assert.equal(f.store.attempts()[0]?.estimatedCost?.amount, 0);
+    assert.ok(f.store.attempts()[0]!.equivalentUsd! > 0);
+  } finally { await f.close(); }
+});

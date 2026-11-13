@@ -1,0 +1,19 @@
+# 构建上下文是仓库根目录（docker build -f deploy/Dockerfile .）。
+# 该文件减少上下文体积；Dockerfile 仍显式 COPY 所需目录。
+.git
+.gitignore
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+data
+backups
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+artifacts
+docs
+apps/admin/.taste-skill

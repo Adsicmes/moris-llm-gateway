@@ -1,0 +1,19 @@
+# 现有 Caddy 站点示例片段（替换为你的真实域名；未提供域名时不要部署）。
+# 假设 Caddy 在宿主网络，网关只监听 127.0.0.1:8787。
+# 若 Caddy 在 bridge 容器中，请把 127.0.0.1 改为 host.docker.internal:8787，
+# 并给 Caddy 服务加 extra_hosts: ["host.docker.internal:host-gateway"]。
+
+moris.example.com {
+	# 不启用 encode：SSE 不能被压缩缓冲。
+	reverse_proxy 127.0.0.1:8787 {
+		# 事件立即下传，避免 Caddy 攒包。
+		flush_interval -1
+
+		transport http {
+			# 应用整次生成上限 15 分钟；这里留 1 分钟余量让应用先给出超时响应。
+			read_timeout 16m
+			write_timeout 16m
+			dial_timeout 10s
+		}
+	}
+}
