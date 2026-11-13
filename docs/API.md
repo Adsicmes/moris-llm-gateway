@@ -15,6 +15,8 @@
 - `PATCH /api/admin/providers/:id` → `{item}`。字段同上但namespace/plugin不可变；secrets按键更新，空字符串删除该键。省略secrets/proxyUrl保留原值。
 - `DELETE /api/admin/providers/:id` → `{ok:true}`。软停用，保留历史。
 - `POST /api/admin/providers/:id/sync` → `{ok,state,error?}`。触发完整目录和额度刷新，失败保留旧快照。
+- `POST /api/admin/providers/:id/oauth/start` → `{verificationUrl,userCode,expiresAt,intervalSeconds}`。插件支持设备授权时可用；设备授权ID仅保存在服务器内存，绑定当前管理员会话。
+- `POST /api/admin/providers/:id/oauth/poll` → `{state:"pending",intervalSeconds,message}` 或 `{state:"complete",accountId,planType?,email?,expiresAt}`。按返回间隔轮询，过期或修改供应商后需重开；凭据加密保存且不返回浏览器。两接口均需CSRF。
 - `GET /api/admin/models` → `{items: CatalogModel[]}` 包含停用条目。
 - `GET /api/admin/quota` → `{items: QuotaSummary[]}`。
 - `GET /api/admin/requests?limit=50&offset=0` → `{items:[{id,modelId,deviceId,startedAt,finishedAt,status,attempts,estimatedCost,settledCost,equivalentUsd}],total}`。原币费用字段为Money数组。

@@ -38,8 +38,9 @@ export function estimateWindow(store: Store, accountId: string, window: QuotaWin
   const attempts = store.accountAttempts(accountId, window.startsAt, window.sampledAt);
   const crossing = store.accountAttempts(accountId, '1970-01-01', window.startsAt).filter(a => a.startedAt < window.startsAt && (!a.finishedAt || a.finishedAt > window.startsAt));
   if (crossing.length) return fail('存在跨窗口调用，费用归属无法确认');
-  const relevant = attempts.filter(a => !a.pool || a.pool === window.pool);
-  if (relevant.some(a => !a.usage || a.equivalentUsd === null || !a.finishedAt || a.finishedAt > window.sampledAt || (window.pool !== 'default' && !a.pool))) return fail('窗口存在未定价、未知用量或未完成调用');
+  if (window.pool !== 'default' && attempts.some(a => !a.pool || a.pool === 'default')) return fail('调用与该独立额度池的归属尚不明确');
+  const relevant = attempts.filter(a => window.pool === 'default' || a.pool === window.pool);
+  if (relevant.some(a => !a.usage || a.equivalentUsd === null || !a.finishedAt || a.finishedAt > window.sampledAt)) return fail('窗口存在未定价、未知用量或未完成调用');
   const spentUsd = relevant.reduce((sum, a) => sum + a.equivalentUsd!, 0);
   if (spentUsd <= 0) return fail('窗口尚无可用的API等价消费');
   const totalUsd = spentUsd / window.usedRatio;

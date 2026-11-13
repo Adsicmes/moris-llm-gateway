@@ -140,7 +140,9 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
           complete = true; success = true;
           reply.raw.end();
         } else {
-          const result = await boundedJson(response, 32 * 1024 * 1024);
+          const result = prepared.responseFormat === 'sse' && protocol === 'responses'
+            ? await aggregateResponse(response, arm, settings.idleTimeoutMs, value => { usage = value; })
+            : await boundedJson(response, 32 * 1024 * 1024);
           const record = result as Record<string, unknown>;
           usage = readUsage(protocol, result);
           if (record.error || record.status === 'failed' || record.status === 'incomplete') throw new UpstreamFailure(false);
@@ -164,10 +166,16 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
           if (plugin.estimate && usage) {
             try { cost = plugin.estimate(model.price, usage, body); } catch { cost = null; }
           }
+          if (cost && (!Number.isFinite(cost.amount) || cost.amount < 0 || !['USD', 'CNY'].includes(cost.currency))) cost = null;
           attempt.estimatedCost = account.billingType === 'subscription' ? { amount: 0, currency: 'USD' } : usage || model.price.kind === 'request' ? cost : null;
           attempt.estimatedCny = asCny(attempt.estimatedCost, settings.usdCny);
           const reference = model.referencePrice ?? model.price;
-          attempt.equivalentUsd = asUsd(estimateCost(reference, usage), settings.usdCny);
+          let equivalent = estimateCost(reference, usage);
+          if (plugin.estimate && usage) {
+            try { equivalent = plugin.estimate(reference, usage, body); } catch { equivalent = null; }
+          }
+          if (equivalent && (!Number.isFinite(equivalent.amount) || equivalent.amount < 0 || !['USD', 'CNY'].includes(equivalent.currency))) equivalent = null;
+          attempt.equivalentUsd = asUsd(equivalent, settings.usdCny);
           store.saveAttempt(attempt);
         }
       }
@@ -201,5 +209,31 @@ async function boundedJson(response: Response, maxBytes: number): Promise<unknow
       chunks.push(result.value);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } finally { await reader.cancel().catch(() => undefined); }
+}
+
+async function aggregateResponse(response: Response, arm: (ms: number) => void, idleMs: number, onUsage: (usage: Usage | null) => void): Promise<Record<string, unknown>> {
+  if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new UpstreamFailure(false);
+  const reader = response.body.getReader(); const decoder = new SseDecoder();
+  let size = 0; let usage: Usage | null = null;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.length;
+      if (size > 32 * 1024 * 1024) throw new UpstreamFailure(false);
+      for (const frame of decoder.push(chunk.value)) {
+        arm(idleMs);
+        const fact = inspectEvent('responses', frame.data, usage);
+        usage = fact.usage; onUsage(usage);
+        if (fact.error) throw new UpstreamFailure(false);
+        if (fact.terminal && frame.data) {
+          const payload = JSON.parse(frame.data) as { response?: Record<string, unknown> };
+          if (!payload.response || typeof payload.response !== 'object') throw new UpstreamFailure(false);
+          return payload.response;
+        }
+      }
+    }
+    throw new UpstreamFailure(true);
   } finally { await reader.cancel().catch(() => undefined); }
 }

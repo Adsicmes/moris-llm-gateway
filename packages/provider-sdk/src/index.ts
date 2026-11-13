@@ -19,6 +19,8 @@ export interface PreparedRequest {
   url: string;
   headers: Record<string, string>;
   body: Record<string, unknown>;
+  /** 上游仅支持SSE时，核心可为非流式Responses调用聚合完成事件。 */
+  responseFormat?: 'sse';
 }
 export interface Settlement {
   upstreamRequestId: string;
@@ -34,7 +36,21 @@ export interface ProviderPlugin {
   /** 仅精确关联的请求可用于真实结算。 */
   reconcile?(context: ProviderContext, since: string): Promise<Settlement[]>;
   estimate?(price: Price, usage: Usage, body: Record<string, unknown>): Money | null;
+  authorization?: {
+    start(context: ProviderContext): Promise<DeviceAuthorization>;
+    poll(context: ProviderContext, grant: DeviceAuthorization): Promise<AuthorizationResult>;
+  };
 }
+export interface DeviceAuthorization {
+  deviceAuthId: string;
+  userCode: string;
+  verificationUrl: string;
+  intervalSeconds: number;
+  expiresAt: string;
+}
+export type AuthorizationResult =
+  | { state: 'pending'; intervalSeconds: number; message: string }
+  | { state: 'complete'; accountId: string; planType?: string; email?: string; expiresAt: string };
 export class ProviderError extends Error {
   constructor(message: string, public readonly code = 'provider_error', public readonly status = 502) {
     super(message); this.name = 'ProviderError';

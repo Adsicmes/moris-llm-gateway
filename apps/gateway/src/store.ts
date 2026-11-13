@@ -142,7 +142,7 @@ export class Store {
   accountAttempts(accountId: string, from: string, until: string): AttemptRecord[] {
     return this.db.prepare('SELECT value FROM attempts WHERE account_id=? AND started_at>=? AND started_at<=? ORDER BY started_at').all(accountId, from, until).map(row => decode<AttemptRecord>(row)!);
   }
-  bills(): Bill[] { return this.db.prepare('SELECT value FROM bills ORDER BY json_extract(value,\'paidAt\') DESC').all().map(row => decode<Bill>(row)!); }
+  bills(): Bill[] { return this.db.prepare("SELECT value FROM bills ORDER BY json_extract(value,'$.paidAt') DESC").all().map(row => decode<Bill>(row)!); }
   saveBill(value: Bill): void { this.db.prepare('INSERT INTO bills VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, JSON.stringify(value)); }
   deleteBill(id: string): boolean { return this.db.prepare('DELETE FROM bills WHERE id=?').run(id).changes > 0; }
   devices(): Device[] { return this.db.prepare('SELECT value FROM devices').all().map(row => decode<Device>(row)!); }

@@ -1,0 +1,11 @@
+{
+  "name": "@moris/provider-deepseek",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "main": "./dist/index.js",
+  "exports": { ".": "./dist/index.js" },
+  "files": ["dist"],
+  "sideEffects": false,
+  "devDependencies": { "@moris/provider-sdk": "0.1.0" }
+}

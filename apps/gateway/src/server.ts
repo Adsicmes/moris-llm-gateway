@@ -11,6 +11,7 @@ import { Transport } from './network.js';
 import { safeEqual, verifyPassword } from './security.js';
 import { executeRequest, GatewayError } from './routing.js';
 import { sumMoney } from './billing.js';
+import type { DeviceAuthorization } from '../../../packages/provider-sdk/src/index.js';
 
 const urlSchema = z.string().url().refine(v => ['http:', 'https:'].includes(new URL(v).protocol) && !new URL(v).username && !new URL(v).password, '需要不含凭据的HTTP(S)地址');
 const proxySchema = z.string().refine(v => { try { return v === '' || ['http:', 'https:', 'socks5:', 'socks5h:'].includes(new URL(v).protocol); } catch { return false; } }, '代理URL无效');
@@ -43,6 +44,8 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   const transport = new Transport(); const providers = new Providers(store, options.registry, transport, options.fetch);
   const devices = new WeakMap<FastifyRequest, Device>();
   const attempts = new Map<string, { count: number; until: number }>();
+  const authorizations = new Map<string, { grant: DeviceAuthorization; owner: string; updatedAt: string; nextPoll: number; busy: boolean }>();
+  const startingAuthorization = new Set<string>();
   await app.register(cookie);
   app.addHook('onResponse', async (req, reply) => {
     app.log.info({ requestId: req.id, method: req.method, route: req.routeOptions.url, status: reply.statusCode, elapsedMs: reply.elapsedTime }, '请求完成');
@@ -119,7 +122,51 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     return { item: account };
   });
   app.delete('/api/admin/providers/:id', async req => { const account = requireAccount(store, idParam(req)); store.saveAccount({ ...account, enabled: false, updatedAt: new Date().toISOString() }); return { ok: true }; });
-  app.post('/api/admin/providers/:id/sync', async req => { requireAccount(store, idParam(req)); return providers.sync(idParam(req)); });
+  app.post('/api/admin/providers/:id/sync', async req => { requireAccount(store, idParam(req)); return providers.manualSync(idParam(req)); });
+  app.post('/api/admin/providers/:id/oauth/start', async req => {
+    const account = requireAccount(store, idParam(req));
+    const auth = options.registry.get(account.plugin).authorization;
+    if (!auth) throw new GatewayError('oauth_unsupported', '此供应商插件不支持设备授权');
+    if (startingAuthorization.has(account.id) || authorizations.get(account.id)?.busy) throw new GatewayError('oauth_busy', '授权操作正在进行，请稍后重试', 409);
+    for (const [id, value] of authorizations) if (Date.parse(value.grant.expiresAt) <= Date.now()) authorizations.delete(id);
+    startingAuthorization.add(account.id);
+    try {
+      const grant = await auth.start(providers.context(account, AbortSignal.timeout(30_000)));
+      if (!grant.deviceAuthId || !grant.userCode || !Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now() || !Number.isFinite(grant.intervalSeconds) || grant.intervalSeconds <= 0 || !['https:', 'http:'].includes(new URL(grant.verificationUrl).protocol)) throw new Error('Invalid device authorization');
+      const intervalSeconds = Math.max(1, grant.intervalSeconds);
+      authorizations.set(account.id, { grant: { ...grant, intervalSeconds }, owner: req.cookies.moris_session!, updatedAt: account.updatedAt, nextPoll: Date.now() + intervalSeconds * 1000, busy: false });
+      return { verificationUrl: grant.verificationUrl, userCode: grant.userCode, expiresAt: grant.expiresAt, intervalSeconds };
+    } catch {
+      throw new GatewayError('oauth_start_failed', '无法开始授权，请检查供应商配置、代理和设备登录支持', 502);
+    } finally { startingAuthorization.delete(account.id); }
+  });
+  app.post('/api/admin/providers/:id/oauth/poll', async req => {
+    const account = requireAccount(store, idParam(req));
+    const value = authorizations.get(account.id);
+    if (!value || value.owner !== req.cookies.moris_session) throw new GatewayError('oauth_missing', '请在当前登录会话中重新开始授权', 409);
+    if (Date.parse(value.grant.expiresAt) <= Date.now() || value.updatedAt !== account.updatedAt) {
+      authorizations.delete(account.id);
+      throw new GatewayError('oauth_expired', '授权已过期或供应商配置已改变，请重新开始', 410);
+    }
+    if (value.busy || Date.now() < value.nextPoll) return { state: 'pending', intervalSeconds: Math.max(1, Math.ceil((value.nextPoll - Date.now()) / 1000)), message: '等待下一次授权查询' };
+    const auth = options.registry.get(account.plugin).authorization;
+    if (!auth) throw new GatewayError('oauth_unsupported', '供应商授权能力不可用');
+    value.busy = true;
+    value.nextPoll = Date.now() + value.grant.intervalSeconds * 1000;
+    try {
+      const result = await auth.poll(providers.context(account, AbortSignal.timeout(30_000)), value.grant);
+      if (result.state === 'complete') authorizations.delete(account.id);
+      else {
+        const interval = Number.isFinite(result.intervalSeconds) && result.intervalSeconds > 0 ? result.intervalSeconds : value.grant.intervalSeconds;
+        value.grant.intervalSeconds = interval;
+        value.nextPoll = Date.now() + interval * 1000;
+      }
+      return result;
+    } catch {
+      authorizations.delete(account.id);
+      throw new GatewayError('oauth_poll_failed', '授权查询失败，请重新开始授权；令牌不会返回浏览器', 502);
+    } finally { value.busy = false; }
+  });
   app.get('/api/admin/models', async () => ({ items: store.models().map(model => ({ ...model, enabled: providers.callable(model), disabledReason: providers.callable(model) ? undefined : model.disabledReason ?? '目录过期或供应商已停用' })) }));
   app.get('/api/admin/quota', async () => ({ items: providers.quotas() }));
   app.get('/api/catalog', async () => providers.catalog());

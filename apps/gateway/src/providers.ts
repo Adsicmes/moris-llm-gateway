@@ -18,6 +18,7 @@ export class ProviderRegistry {
 export class Providers {
   private pending = new Map<string, Promise<{ ok: boolean; state: string; error?: string }>>();
   private schedule = new Map<string, { catalog: number; monitor: number; failures: number }>();
+  private manualRefreshAt = new Map<string, number>();
   private timer?: ReturnType<typeof setInterval>;
   private stop = new AbortController();
   constructor(readonly store: Store, readonly registry: ProviderRegistry, readonly transport: Transport, private fetchOverride?: typeof fetch) {}
@@ -34,6 +35,13 @@ export class Providers {
     const ongoing = this.pending.get(id); if (ongoing) return ongoing;
     const work = this.performSync(id, catalog).finally(() => this.pending.delete(id));
     this.pending.set(id, work); return work;
+  }
+  async manualSync(id: string): Promise<{ ok: boolean; state: string; error?: string }> {
+    const ongoing = this.pending.get(id); if (ongoing) return ongoing;
+    const wait = Math.min(10_000 * 2 ** (this.schedule.get(id)?.failures ?? 0), 120_000);
+    if (Date.now() - (this.manualRefreshAt.get(id) ?? 0) < wait) return { ok: false, state: 'rate_limited', error: '刷新过于频繁或上游处于退避期，请稍后重试' };
+    this.manualRefreshAt.set(id, Date.now());
+    return this.sync(id);
   }
   private async performSync(id: string, catalog: boolean): Promise<{ ok: boolean; state: string; error?: string }> {
     const account = this.store.account(id);
@@ -59,6 +67,7 @@ export class Providers {
     }
     try {
       const monitor: ProviderMonitor = plugin.monitor ? await plugin.monitor(context) : { state: 'unsupported', balances: [], windows: [], sampledAt: at, message: '该插件尚无余额或窗口查询接口' };
+      if (monitor.state === 'error') throw new Error('供应商监控失败');
       if (monitor.balances.some(b => !Number.isFinite(b.amount)) || monitor.windows.some(w => !Number.isFinite(w.usedRatio) || w.usedRatio < 0 || w.usedRatio > 1)) throw new Error('额度数据无效');
       this.store.saveMonitor(id, monitor);
     } catch {
@@ -84,7 +93,7 @@ export class Providers {
   }
   catalog(): CatalogResponse {
     return {
-      providerID: 'moris', fetchedAt: new Date().toISOString(), models: this.store.models().filter(model => this.callable(model)),
+      providerID: 'moris', fetchedAt: new Date().toISOString(), models: this.store.models().filter(model => this.callable(model)).map(model => ({ ...model, billingType: this.store.account(model.accountId)!.billingType })),
       accounts: this.store.accounts().filter(a => a.enabled).map(account => {
         const state = this.store.syncState(account.id);
         return { id: account.id, lastSyncedAt: state.lastSyncedAt, state: !state.lastSyncedAt ? 'unknown' : Date.now() - Date.parse(state.lastSyncedAt) >= this.store.settings().catalogTtlMs ? 'stale' : state.error ? 'error' : 'ok', error: state.error ?? undefined };

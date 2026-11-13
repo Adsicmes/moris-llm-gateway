@@ -46,6 +46,16 @@ test('缓存单独计价，复杂和未知价格不能估成零', () => {
   assert.equal(estimateCost({ kind: 'token', currency: 'USD', input: 2, output: 4 }, { input: 100, output: 10, cacheRead: 90, cacheWrite: 0 }), null);
   assert.deepEqual(estimateCost({ kind: 'token', currency: 'USD', input: 2, output: 4, cacheRead: 0.2 }, { input: 100, output: 10, cacheRead: 90, cacheWrite: 0 }), { amount: 0.000078, currency: 'USD' });
 });
+test('人民币账单新增后可查询，按付款时间排序并保留退款负数', () => {
+  const store = new Store(':memory:', key());
+  try {
+    const at = '2026-11-13T00:00:00.000Z';
+    store.saveBill({ id: 'paid', accountId: 'a', paidAt: at, amountCny: 100, createdAt: at, updatedAt: at });
+    store.saveBill({ id: 'refund', accountId: 'a', paidAt: '2026-11-14T00:00:00.000Z', amountCny: -20, note: '退款', createdAt: at, updatedAt: at });
+    assert.deepEqual(store.bills().map(b => b.id), ['refund', 'paid']);
+    assert.equal(store.bills().reduce((sum, b) => sum + b.amountCny, 0), 80);
+  } finally { store.close(); }
+});
 test('对账按唯一请求关联，真实与估算不重复累计，历史汇率不变', () => {
   const store = new Store(':memory:', key());
   try {
