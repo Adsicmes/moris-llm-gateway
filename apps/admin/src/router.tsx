@@ -1,4 +1,5 @@
-import { useEffect, useState, type AnchorHTMLAttributes, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type AnchorHTMLAttributes, type ReactNode } from 'react';
+import { confirmNavigation } from './lib/navigation-guard';
 
 export type Route =
   | { name: 'overview' }
@@ -68,13 +69,25 @@ export function routeHref(route: Route): string {
 export function navigate(route: Route | string): void {
   const next = typeof route === 'string' ? route : routeHref(route);
   if (window.location.hash === next) return;
+  if (!confirmNavigation()) return;
   window.location.hash = next;
 }
 
 export function useRoute(): Route {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+  const lastHash = useRef(window.location.hash);
   useEffect(() => {
-    const onChange = () => setRoute(parseRoute(window.location.hash));
+    const onChange = () => {
+      const next = window.location.hash;
+      if (next === lastHash.current) return;
+      if (!confirmNavigation()) {
+        // 在更新路由状态前恢复地址；页面不卸载，未保存的草稿不会丢失。
+        window.location.hash = lastHash.current;
+        return;
+      }
+      lastHash.current = next;
+      setRoute(parseRoute(next));
+    };
     window.addEventListener('hashchange', onChange);
     return () => window.removeEventListener('hashchange', onChange);
   }, []);

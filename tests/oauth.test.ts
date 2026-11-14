@@ -18,6 +18,7 @@ interface FakeState {
   startError?: Error;
   pollError?: Error;
   pollResult: AuthorizationResult;
+  statusResult: { authorized: boolean; accountId?: string; planType?: string; email?: string; expiresAt?: string };
   onPoll?: (context: ProviderContext) => Promise<void> | void;
 }
 
@@ -43,6 +44,7 @@ async function fixture() {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     },
     pollResult: { state: 'pending', intervalSeconds: 1, message: '等待授权' },
+    statusResult: { authorized: false },
   };
 
   const registry = new ProviderRegistry();
@@ -62,6 +64,7 @@ async function fixture() {
         if (state.pollError) throw state.pollError;
         return state.pollResult;
       },
+      status: async () => state.statusResult,
     },
   });
 
@@ -215,6 +218,52 @@ test('授权到期或账号修改后拒绝轮询', async () => {
     poll = await f.app.inject({ method: 'POST', url: f.pollUrl, headers: f.first });
     assert.equal(poll.statusCode, 410);
     assert.equal(poll.json().error.code, 'oauth_expired');
+  } finally {
+    await f.close();
+  }
+});
+
+test('授权状态可刷新回显，且不返回任何令牌', async () => {
+  const f = await fixture();
+  try {
+    f.state.statusResult = {
+      authorized: true,
+      accountId: 'account-1',
+      planType: 'pro',
+      email: 'user@example.com',
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    };
+    assert.equal(
+      (await f.app.inject({ url: '/api/admin/providers/a/authorization', headers: { authorization: 'Bearer device' } })).statusCode,
+      401,
+    );
+    const response = await f.app.inject({ url: '/api/admin/providers/a/authorization', headers: f.first });
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as Record<string, unknown>;
+    assert.equal(body.supported, true);
+    assert.equal(body.statusKnown, true);
+    assert.equal(body.authorized, true);
+    assert.equal(body.accountId, 'account-1');
+    assert.equal(body.email, 'user@example.com');
+    assert.ok(!response.body.includes('existing-upstream-key'));
+    assert.ok(!response.body.includes('refreshToken'));
+  } finally {
+    await f.close();
+  }
+});
+
+test('授权起点错误按代码给出可执行原因，仍不回显敏感正文', { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  try {
+    f.state.startError = Object.assign(new Error('proxy=http://user:secret@proxy connect ECONNREFUSED'), {
+      code: 'network',
+      status: 502,
+    });
+    const response = await f.app.inject({ method: 'POST', url: f.startUrl, headers: f.first });
+    assert.equal(response.statusCode, 502);
+    assert.equal(response.json().error.code, 'oauth_start_failed');
+    assert.match(response.json().error.message, /代理|host\.docker\.internal/);
+    assert.ok(!response.body.includes('secret'));
   } finally {
     await f.close();
   }

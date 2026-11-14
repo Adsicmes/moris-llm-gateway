@@ -1,5 +1,8 @@
 import {
+  Children,
+  cloneElement,
   createContext,
+  isValidElement,
   useCallback,
   useContext,
   useEffect,
@@ -7,6 +10,7 @@ import {
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type ReactElement,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -298,15 +302,17 @@ export function Card({
   children,
   className,
   flush = false,
+  id,
 }: {
   title?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
   flush?: boolean;
+  id?: string;
 }) {
   return (
-    <section className={`card${flush ? ' card--flush' : ''}${className ? ` ${className}` : ''}`}>
+    <section id={id} className={`card${flush ? ' card--flush' : ''}${className ? ` ${className}` : ''}`}>
       {title || action ? (
         <header className="card__head">
           {title ? <h2>{title}</h2> : <span />}
@@ -409,10 +415,32 @@ export function Field({
   children: ReactNode;
   className?: string;
 }) {
+  const hintId: string | null = hint != null && !error ? `${id}-hint` : null;
+  const errorId: string | null = error ? `${id}-error` : null;
+  let control = children;
+
+  // 把提示/错误与真正的控件关联；调用方已有的 aria-describedby 会保留并合并。
+  if (Children.count(children) === 1 && isValidElement(children)) {
+    const type = children.type;
+    const formControl =
+      typeof type === 'function' || (typeof type === 'string' && ['input', 'select', 'textarea'].includes(type));
+    if (formControl) {
+      const props = children.props as Record<string, unknown>;
+      const existing = typeof props['aria-describedby'] === 'string' ? props['aria-describedby'] : '';
+      const describedBy = [...existing.split(/\s+/).filter(Boolean), hintId, errorId].filter(
+        (value, index, list): value is string => Boolean(value) && list.indexOf(value) === index,
+      );
+      control = cloneElement(children as ReactElement<Record<string, unknown>>, {
+        ...(describedBy.length > 0 ? { 'aria-describedby': describedBy.join(' ') } : {}),
+        ...(error ? { 'aria-invalid': true } : {}),
+      });
+    }
+  }
+
   return (
     <div className={`field${className ? ` ${className}` : ''}`}>
       <label htmlFor={id}>{label}</label>
-      {children}
+      {control}
       {error ? (
         <p className="field__error" id={`${id}-error`} role="alert">
           {error}
@@ -729,5 +757,24 @@ export function InlineNote({
       <Icon name={tone === 'ok' ? 'check' : tone === 'bad' ? 'alert' : 'shield'} size={18} />
       <div>{children}</div>
     </div>
+  );
+}
+
+/** 长文本不再只依赖 title：先显示摘要，展开后完整可读且可键盘操作。 */
+export function ExpandableText({ text, limit = 72 }: { text: string; limit?: number }) {
+  const [open, setOpen] = useState(false);
+  if (text.length <= limit) return <>{text}</>;
+  return (
+    <span className="expandable-text">
+      <span>{open ? text : `${text.slice(0, limit)}…`}</span>
+      <button
+        type="button"
+        className="link-button expandable-text__toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? '收起' : '展开'}
+      </button>
+    </span>
   );
 }

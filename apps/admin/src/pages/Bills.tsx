@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useRef, useState, type FormEvent } from 'react';
 import { useApi } from '../auth';
 import type { Bill, BillInput, BillsResponse, ProvidersResponse } from '../types';
 import { describeError } from '../lib/api';
@@ -10,6 +10,7 @@ import {
   ConfirmDialog,
   EmptyState,
   ErrorState,
+  ExpandableText,
   Field,
   focusFirstInvalid,
   InlineNote,
@@ -43,6 +44,13 @@ function BillForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const initialRef = useRef(JSON.stringify({ accountId, paidAt, amount, period, method, note }));
+  const savedRef = useRef(false);
+  const dirty = JSON.stringify({ accountId, paidAt, amount, period, method, note }) !== initialRef.current;
+  const requestClose = () => {
+    if (!savedRef.current && dirty && !window.confirm('账单还有未保存的修改，关闭会丢失。确定关闭吗？')) return;
+    onClose();
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -79,6 +87,7 @@ function BillForm({
     setFormError(null);
     try {
       await onSave(input, bill?.id);
+      savedRef.current = true;
       onClose();
     } catch (error) {
       setFormError(describeError(error));
@@ -92,10 +101,10 @@ function BillForm({
       open
       title={bill ? '编辑人民币账单' : '记录一笔人民币付款'}
       description="实付统一以 CNY 记录。退款用负数金额，并在备注中说明。"
-      onClose={onClose}
+      onClose={requestClose}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose} disabled={busy}>
+          <Button variant="secondary" onClick={requestClose} disabled={busy}>
             取消
           </Button>
           <Button variant="primary" type="submit" form="bill-form" loading={busy}>
@@ -365,8 +374,8 @@ export function BillsPage() {
                         </td>
                         <td>{bill.period ?? '—'}</td>
                         <td>{bill.method ?? '—'}</td>
-                        <td className="cell-note" title={bill.note ?? ''}>
-                          {bill.note ? bill.note : '—'}
+                        <td className="cell-note">
+                          {bill.note ? <ExpandableText text={bill.note} /> : '—'}
                         </td>
                         <td className="nowrap small">
                           <span title={`创建 ${formatDateTime(bill.createdAt)}`}>{formatDateTime(bill.updatedAt)}</span>

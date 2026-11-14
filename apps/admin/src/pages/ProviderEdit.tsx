@@ -1,13 +1,22 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useApi } from '../auth';
-import type { PluginsResponse, ProviderAccount, ProviderInput, ProvidersResponse } from '../types';
+import type {
+  PluginsResponse,
+  ProviderAccount,
+  ProviderAuthorizationStatus,
+  ProviderInput,
+  ProvidersResponse,
+  SyncResult,
+} from '../types';
 import type { BillingType, TokenTemplate } from '../lib/contracts';
 import { describeError } from '../lib/api';
 import { prettyJson, formatDateTime } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import { useUnsavedChanges } from '../lib/unsaved';
 import { Link, navigate } from '../router';
 import { OpenAIProviderAuth } from './OpenAIProviderAuth';
 import {
+  Badge,
   Button,
   Card,
   Checkbox,
@@ -84,6 +93,48 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [authorizationStatus, setAuthorizationStatus] = useState<ProviderAuthorizationStatus | null>(null);
+  const baseUrlTouched = useRef(mode === 'edit');
+  const billingTouched = useRef(mode === 'edit');
+  const [baseline, setBaseline] = useState<string | null>(
+    mode === 'new'
+      ? JSON.stringify({
+          namespace: '',
+          name: '',
+          plugin: '',
+          baseUrl: '',
+          billingType: 'metered',
+          enabled: true,
+          proxyUrl: '',
+          autoCreateTokens: false,
+          token: EMPTY_TOKEN,
+          optionsText: '{}',
+          secrets: [{ id: 1, key: '', value: '', remove: false }],
+        })
+      : null,
+  );
+
+  const snapshot = useMemo(
+    () =>
+      JSON.stringify({
+        namespace,
+        name,
+        plugin,
+        baseUrl,
+        billingType,
+        enabled,
+        proxyUrl,
+        autoCreateTokens,
+        token,
+        optionsText,
+        secrets: secretRows,
+      }),
+    [namespace, name, plugin, baseUrl, billingType, enabled, proxyUrl, autoCreateTokens, token, optionsText, secretRows],
+  );
+  const dirty = baseline !== null && snapshot !== baseline;
+  const { allowNavigation } = useUnsavedChanges(dirty && !busy);
 
   useEffect(() => {
     if (mode !== 'edit' || initialized) return;
@@ -103,25 +154,98 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     setEnabled(found.enabled);
     setProxyUrl(found.proxyUrl ?? '');
     setAutoCreateTokens(found.autoCreateTokens);
-    setToken(
-      found.tokenTemplate
-        ? {
-            name: found.tokenTemplate.namePrefix,
-            quota: String(found.tokenTemplate.quota),
-            expires: String(found.tokenTemplate.expiresInDays),
-            unlimited: Boolean(found.tokenTemplate.unlimited),
-          }
-        : EMPTY_TOKEN,
+    const nextToken: TokenDraft = found.tokenTemplate
+      ? {
+          name: found.tokenTemplate.namePrefix,
+          quota: String(found.tokenTemplate.quota),
+          expires: String(found.tokenTemplate.expiresInDays),
+          unlimited: Boolean(found.tokenTemplate.unlimited),
+        }
+      : EMPTY_TOKEN;
+    const nextOptions = prettyJson(found.options ?? {});
+    setToken(nextToken);
+    setOptionsText(nextOptions);
+    // 同一次回填里建立基线，避免后续渲染把空表单误判成“已修改”。
+    setBaseline(
+      JSON.stringify({
+        namespace: found.namespace,
+        name: found.name,
+        plugin: found.plugin,
+        baseUrl: found.baseUrl,
+        billingType: found.billingType,
+        enabled: found.enabled,
+        proxyUrl: found.proxyUrl ?? '',
+        autoCreateTokens: found.autoCreateTokens,
+        token: nextToken,
+        optionsText: nextOptions,
+        secrets: [{ id: 1, key: '', value: '', remove: false }],
+      }),
     );
-    setOptionsText(prettyJson(found.options ?? {}));
     setInitialized(true);
   }, [mode, initialized, providers.data, id]);
 
   const pluginList = plugins.data?.items ?? [];
   const pluginMissing = plugin !== '' && !pluginList.some((item) => item.id === plugin);
+  const selectedPlugin = pluginList.find((item) => item.id === plugin);
+  const setup = selectedPlugin?.setup;
+  const templateSupported = setup?.tokenTemplate?.supported !== false;
+  const authorizationSupported = setup?.authorization?.supported === true;
+
+  const changePlugin = (nextId: string) => {
+    const previous = selectedPlugin?.setup;
+    const next = pluginList.find((item) => item.id === nextId)?.setup;
+    setPlugin(nextId);
+    if (!baseUrlTouched.current) {
+      const previousDefault = previous?.baseUrl?.default ?? '';
+      if (baseUrl.trim() === '' || baseUrl === previousDefault) setBaseUrl(next?.baseUrl?.default ?? '');
+    }
+    if (!billingTouched.current) {
+      const previousDefault = previous?.billingType?.default;
+      if (previousDefault === undefined || billingType === previousDefault) {
+        setBillingType(next?.billingType?.default ?? 'metered');
+      }
+    }
+    if (next?.tokenTemplate?.supported === false) setAutoCreateTokens(false);
+    const first = next?.secrets?.[0]?.key;
+    const row = secretRows[0];
+    if (first && secretRows.length === 1 && row && !row.key && !row.value && !row.remove) {
+      setSecretRows([{ ...row, key: first, value: '', remove: false }]);
+    }
+    setSyncResult(null);
+    setAuthorizationStatus(null);
+  };
+
+  const applyRecommendedBaseUrl = () => {
+    if (setup?.baseUrl?.default) {
+      baseUrlTouched.current = true;
+      setBaseUrl(setup.baseUrl.default);
+    }
+  };
 
   const addSecret = () => {
-    setSecretRows((current) => [...current, { id: nextSecretId.current++, key: '', value: '', remove: false }]);
+    const used = new Set(secretRows.map((row) => row.key.trim()).filter(Boolean));
+    const key = setup?.secrets?.find((field) => !used.has(field.key))?.key ?? '';
+    setSecretRows((current) => [...current, { id: nextSecretId.current++, key, value: '', remove: false }]);
+  };
+
+  const syncProvider = async () => {
+    if (!id) return;
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const result = await api<SyncResult>(`/api/admin/providers/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+      setSyncResult(result);
+      if (result.ok) {
+        toast.push('目录与额度同步完成。下一步到模型目录核对可调用条目。');
+        providers.reload();
+      } else {
+        toast.push(result.error ? `同步失败：${result.error}` : '同步失败，已保留上一次快照。', 'bad');
+      }
+    } catch (error) {
+      toast.push(`同步失败：${describeError(error)}`, 'bad');
+    } finally {
+      setSyncing(false);
+    }
   };
 
   const updateSecret = (rowId: number, patch: Partial<SecretRow>) => {
@@ -175,7 +299,9 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     const expiresNumber = Number(tokenExpires);
     const hasTemplate = Boolean(token.name.trim() || token.quota.trim() || token.expires.trim() || token.unlimited);
 
-    if (autoCreateTokens) {
+    if (autoCreateTokens && !templateSupported) {
+      nextErrors['token.name'] = '当前插件不支持自动创建上游令牌，请关闭该选项。';
+    } else if (autoCreateTokens) {
       if (!token.name.trim()) nextErrors['token.name'] = '开启自动创建时必须填写令牌名称前缀。';
       else if (token.name.trim().length > 64) nextErrors['token.name'] = '名称前缀最多 64 个字符。';
       if (!token.unlimited && token.quota.trim() === '') nextErrors['token.quota'] = '填写额度，或勾选「不限额」。';
@@ -186,7 +312,10 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
       }
     }
 
-    if (autoCreateTokens || (hasTemplate && Number.isFinite(quotaNumber) && Number.isFinite(expiresNumber) && token.name.trim())) {
+    if (
+      templateSupported &&
+      (autoCreateTokens || (hasTemplate && Number.isFinite(quotaNumber) && Number.isFinite(expiresNumber) && token.name.trim()))
+    ) {
       template = {
         namePrefix: token.name.trim() || 'moris',
         quota: Number.isFinite(quotaNumber) ? quotaNumber : 0,
@@ -251,8 +380,14 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     setBusy(true);
     try {
       if (mode === 'new') {
-        await api<{ item: ProviderAccount }>('/api/admin/providers', { method: 'POST', body: result.input });
-        toast.push('供应商已创建。下一步可以同步目录。');
+        const created = await api<{ item: ProviderAccount }>('/api/admin/providers', {
+          method: 'POST',
+          body: result.input,
+        });
+        toast.push('供应商已创建。下一步按「接入步骤」完成授权、目录同步与模型核对。');
+        allowNavigation();
+        navigate({ name: 'provider-edit', id: created.item.id });
+        return;
       } else {
         const patchInput: Partial<ProviderInput> = { ...result.input };
         delete patchInput.namespace;
@@ -263,6 +398,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         });
         toast.push('供应商配置已保存。');
       }
+      allowNavigation();
       navigate('#/providers');
     } catch (error) {
       setFormError(describeError(error));
@@ -353,12 +489,21 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   />
                 </Field>
 
-                <Field label="插件" id="provider-plugin" error={errors.plugin} hint="插件读取供应商目录、价格、余额与协议差异。创建后不可修改。">
+                <Field
+                  label="插件"
+                  id="provider-plugin"
+                  error={errors.plugin}
+                  hint={
+                    mode === 'edit'
+                      ? '插件决定目录、价格、余额与协议；创建后不可修改。'
+                      : '选择插件会自动填入推荐 Base URL 与计费类型；你手动改过的值不会被切换覆盖。'
+                  }
+                >
                   {pluginList.length > 0 ? (
                     <Select
                       id="provider-plugin"
                       value={plugin}
-                      onChange={(event) => setPlugin(event.target.value)}
+                      onChange={(event) => changePlugin(event.target.value)}
                       disabled={mode === 'edit'}
                       aria-invalid={Boolean(errors.plugin)}
                     >
@@ -384,11 +529,21 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   )}
                 </Field>
 
-                <Field label="计费类型" id="provider-billing" hint="订阅与按量的价格口径不同，供应商真实扣费仍需单独对账。">
+                <Field
+                  label="计费类型"
+                  id="provider-billing"
+                  hint={
+                    setup?.billingType?.hint ??
+                    '订阅与按量的价格口径不同；保存后只影响后续请求，历史账本不重算。'
+                  }
+                >
                   <Select
                     id="provider-billing"
                     value={billingType}
-                    onChange={(event) => setBillingType(event.target.value as BillingType)}
+                    onChange={(event) => {
+                      billingTouched.current = true;
+                      setBillingType(event.target.value as BillingType);
+                    }}
                   >
                     <option value="metered">按量计费</option>
                     <option value="subscription">订阅</option>
@@ -399,14 +554,30 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   label="Base URL"
                   id="provider-base-url"
                   error={errors.baseUrl}
-                  hint="包含协议与主机，例如 https://api.deepseek.com。"
+                  hint={
+                    <>
+                      {setup?.baseUrl?.hint ??
+                        '包含协议与主机，例如 https://api.example.com；不要包含用户名、密码或查询参数。'}
+                      {setup?.baseUrl?.default && baseUrl !== setup.baseUrl.default ? (
+                        <>
+                          {' '}
+                          <button type="button" className="link-button" onClick={applyRecommendedBaseUrl}>
+                            使用推荐值 {setup.baseUrl.default}
+                          </button>
+                        </>
+                      ) : null}
+                    </>
+                  }
                   className="field--wide"
                 >
                   <Input
                     id="provider-base-url"
                     value={baseUrl}
-                    onChange={(event) => setBaseUrl(event.target.value)}
-                    placeholder="https://api.example.com"
+                    onChange={(event) => {
+                      baseUrlTouched.current = true;
+                      setBaseUrl(event.target.value);
+                    }}
+                    placeholder={setup?.baseUrl?.default ?? 'https://api.example.com'}
                     className="mono"
                     aria-invalid={Boolean(errors.baseUrl)}
                     aria-describedby={errors.baseUrl ? 'provider-base-url-error' : undefined}
@@ -418,9 +589,15 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   id="provider-proxy"
                   error={errors.proxyUrl}
                   hint={
-                    mode === 'edit'
-                      ? '留空并保存将移除代理；未改动时保持服务端原值。代理中的认证信息不会回传。'
-                      : '可选。支持 http、https、socks5、socks5h；留空表示直连。'
+                    <>
+                      例：<code>http://host.docker.internal:7890</code> 或{' '}
+                      <code>socks5h://host.docker.internal:7891</code>。容器里的{' '}
+                      <code>127.0.0.1</code> 指向网关容器自身；要连宿主代理请用{' '}
+                      <code>host.docker.internal:端口</code>（compose 已配置 host-gateway）或宿主内网 IP。
+                      <br />
+                      先保存代理再发起设备授权：授权、目录同步和推理都会走同一代理。代理用户名密码只保存在服务端，不会回传；
+                      {mode === 'edit' ? '留空并保存会移除代理，未改动时保持原值。' : '留空表示直连。'}
+                    </>
                   }
                   className="field--wide"
                 >
@@ -428,7 +605,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     id="provider-proxy"
                     value={proxyUrl}
                     onChange={(event) => setProxyUrl(event.target.value)}
-                    placeholder="不填则直连"
+                    placeholder="http://host.docker.internal:7890"
                     className="mono"
                     aria-invalid={Boolean(errors.proxyUrl)}
                     aria-describedby={errors.proxyUrl ? 'provider-proxy-error' : undefined}
@@ -451,6 +628,35 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
               />
             </Card>
 
+            {setup ? (
+              <Card title={`${selectedPlugin?.name ?? plugin} · 插件说明`}>
+                <dl className="meta-list">
+                  <div>
+                    <dt>推荐 Base URL</dt>
+                    <dd className="mono break">{setup.baseUrl?.default ?? '无通用默认值，必须填写'}</dd>
+                  </div>
+                  <div>
+                    <dt>默认计费类型</dt>
+                    <dd>{setup.billingType?.default === 'subscription' ? '订阅' : '按量计费'}</dd>
+                  </div>
+                  <div>
+                    <dt>设备授权</dt>
+                    <dd>{setup.authorization?.supported ? '支持（需保存后在本页发起）' : '不支持'}</dd>
+                  </div>
+                  <div>
+                    <dt>上游令牌模板</dt>
+                    <dd>{setup.tokenTemplate?.supported ? '支持自动创建' : '不使用'}</dd>
+                  </div>
+                </dl>
+                <ul className="check-list form-note">
+                  {setup.baseUrl?.hint ? <li>{setup.baseUrl.hint}</li> : null}
+                  {setup.billingType?.hint ? <li>{setup.billingType.hint}</li> : null}
+                  {setup.authorization?.hint ? <li>{setup.authorization.hint}</li> : null}
+                  {setup.tokenTemplate?.hint ? <li>{setup.tokenTemplate.hint}</li> : null}
+                </ul>
+              </Card>
+            ) : null}
+
             {mode === 'edit' && original?.plugin === 'openai-subscription' ? (
               <OpenAIProviderAuth
                 key={original.id}
@@ -458,15 +664,35 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                 providerName={original.name}
                 onAuthorized={providers.reload}
                 onSynced={providers.reload}
+                onStatusChange={setAuthorizationStatus}
               />
             ) : null}
 
             <Card title="上游密钥">
               <InlineNote>
                 已保存的密钥不会从接口返回。这里只提交新增或替换的键；把「删除」勾上并保存，会向服务端发送空字符串以删除该键。
+                {authorizationSupported
+                  ? ' 设备授权完成后 accessToken/refreshToken 由服务端写入；手工填写只用于导入已有令牌。'
+                  : ''}
               </InlineNote>
+              {setup?.secrets?.length ? (
+                <div className="secret-guide">
+                  <h3>这个插件需要的键</h3>
+                  <ul className="check-list">
+                    {setup.secrets.map((field) => (
+                      <li key={field.key}>
+                        <code>{field.key}</code>{' '}
+                        {field.required ? <Badge tone="warn">必需</Badge> : <Badge>可选</Badge>}{' '}
+                        {field.description}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               <div className="secret-list">
-                {secretRows.map((row) => (
+                {secretRows.map((row) => {
+                  const field = setup?.secrets?.find((item) => item.key === row.key.trim());
+                  return (
                   <div className="secret-row" key={row.id}>
                     <div className="field">
                       <label htmlFor={`secret-key-${row.id}`}>键名</label>
@@ -474,11 +700,12 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                         id={`secret-key-${row.id}`}
                         value={row.key}
                         onChange={(event) => updateSecret(row.id, { key: event.target.value })}
-                        placeholder="apiKey"
+                        placeholder={field?.key ?? setup?.secrets?.[0]?.key ?? 'apiKey'}
                         className="mono"
                         disabled={row.remove}
                         autoComplete="off"
                         aria-invalid={Boolean(errors[`secret.${row.id}`])}
+                        aria-describedby={errors[`secret.${row.id}`] ? `secret-key-${row.id}-error` : undefined}
                       />
                     </div>
                     <div className="field">
@@ -487,7 +714,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                         id={`secret-value-${row.id}`}
                         value={row.value}
                         onChange={(event) => updateSecret(row.id, { value: event.target.value })}
-                        placeholder={row.remove ? '将删除该键' : '留空表示保持不变'}
+                        placeholder={row.remove ? '将删除该键' : field?.placeholder ?? '留空表示保持不变'}
                         type="password"
                         className="mono"
                         disabled={row.remove}
@@ -504,21 +731,34 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                         移除
                       </Button>
                     </div>
-                    {errors[`secret.${row.id}`] ? <p className="field__error">{errors[`secret.${row.id}`]}</p> : null}
+                    {errors[`secret.${row.id}`] ? (
+                      <p className="field__error" id={`secret-key-${row.id}-error`}>
+                        {errors[`secret.${row.id}`]}
+                      </p>
+                    ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
               <Button variant="secondary" size="sm" icon="plus" onClick={addSecret}>
                 添加密钥
               </Button>
             </Card>
 
+            {templateSupported ? (
             <Card title="上游令牌模板">
+              {setup?.tokenTemplate?.hint ? (
+                <p className="small muted form-note form-note--top">{setup.tokenTemplate.hint}</p>
+              ) : null}
               <Checkbox
                 label="允许自动创建上游令牌"
                 description="默认关闭。开启后只按以下模板创建，并优先复用本网关管理的既有令牌；不会修改或删除其他令牌。"
                 checked={autoCreateTokens}
-                onChange={(event) => setAutoCreateTokens(event.target.checked)}
+                onChange={(event) => {
+                  const next = event.target.checked;
+                  setAutoCreateTokens(next);
+                  if (next && !token.name.trim()) setToken((current) => ({ ...current, name: 'moris' }));
+                }}
               />
               <FormGrid>
                 <Field label="名称前缀" id="token-name" error={errors['token.name']} hint="用于识别本网关创建的令牌。">
@@ -526,7 +766,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     id="token-name"
                     value={token.name}
                     onChange={(event) => setToken((current) => ({ ...current, name: event.target.value }))}
-                    placeholder="moris-gateway"
+                    placeholder="moris"
                     className="mono"
                     maxLength={64}
                     aria-invalid={Boolean(errors['token.name'])}
@@ -573,13 +813,20 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                 <p className="small muted form-note">自动创建关闭时，不完整模板不会提交；完整模板会保留，供以后开启。</p>
               )}
             </Card>
+            ) : (
+              <Card title="上游令牌模板">
+                <InlineNote>
+                  {setup?.tokenTemplate?.hint ?? '当前插件不使用上游令牌模板；凭据由插件自己的授权或密钥提供。'}
+                </InlineNote>
+              </Card>
+            )}
 
             <Card title="插件选项">
               <Field
                 label="options JSON"
                 id="provider-options"
                 error={errors.options}
-                hint="原样提交给插件的对象。留空等同于 {}。"
+                hint={setup?.options?.hint ?? '原样提交给插件的对象。留空等同于 {}。'}
               >
                 <Textarea
                   id="provider-options"
@@ -592,35 +839,121 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   aria-describedby={errors.options ? 'provider-options-error' : undefined}
                 />
               </Field>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  const parsed = parseOptions(optionsText);
-                  if (parsed.error) {
-                    setErrors((current) => ({ ...current, options: parsed.error ?? '' }));
-                  } else {
-                    setOptionsText(prettyJson(parsed.value ?? {}));
-                    setErrors((current) => {
-                      const next = { ...current };
-                      delete next.options;
-                      return next;
-                    });
-                  }
-                }}
-              >
-                格式化 JSON
-              </Button>
+              {setup?.options?.fields?.length ? (
+                <div className="secret-guide">
+                  <h3>这个插件的 options 字段</h3>
+                  <ul className="check-list">
+                    {setup.options.fields.map((field) => (
+                      <li key={field.key}>
+                        <code>{field.key}</code> {field.description}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              <div className="row-actions">
+                {setup?.options?.example ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      if (
+                        optionsText.trim() &&
+                        optionsText.trim() !== '{}' &&
+                        !window.confirm('用插件示例替换当前 options JSON？')
+                      ) {
+                        return;
+                      }
+                      setOptionsText(prettyJson(setup.options?.example ?? {}));
+                      setErrors((current) => {
+                        const next = { ...current };
+                        delete next.options;
+                        return next;
+                      });
+                    }}
+                  >
+                    填入插件示例
+                  </Button>
+                ) : null}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const parsed = parseOptions(optionsText);
+                    if (parsed.error) {
+                      setErrors((current) => ({ ...current, options: parsed.error ?? '' }));
+                    } else {
+                      setOptionsText(prettyJson(parsed.value ?? {}));
+                      setErrors((current) => {
+                        const next = { ...current };
+                        delete next.options;
+                        return next;
+                      });
+                    }
+                  }}
+                >
+                  格式化 JSON
+                </Button>
+              </div>
             </Card>
           </div>
 
           <aside className="form-layout__side">
+            <Card title={mode === 'new' ? '创建后的接入步骤' : '接入步骤'}>
+              <ol className="check-list step-list">
+                <li>{mode === 'edit' ? '供应商配置已保存。' : '先保存供应商；保存后会留在编辑页继续下一步。'}</li>
+                <li>
+                  {authorizationSupported
+                    ? authorizationStatus?.authorized
+                      ? `设备授权已完成${authorizationStatus.planType ? `（${authorizationStatus.planType}）` : ''}。`
+                      : '完成设备授权；先保存代理，再发起授权。'
+                    : '无需设备授权。'}
+                </li>
+                <li>
+                  同步目录与余额。
+                  {syncResult ? (
+                    <span className={syncResult.ok ? 'small muted' : 'small danger-text'}>
+                      {' '}
+                      {syncResult.ok ? '同步成功。' : syncResult.error ?? '同步失败，保留上次快照。'}
+                    </span>
+                  ) : null}
+                </li>
+                <li>
+                  到 <Link className="text-link" to={{ name: 'models' }}>模型目录</Link>{' '}
+                  核对可调用条目，必要时调整参数。
+                </li>
+              </ol>
+              {mode === 'edit' ? (
+                <div className="oauth-actions form-note">
+                  {authorizationSupported && !authorizationStatus?.authorized ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon="link"
+                      onClick={() => document.getElementById('provider-authorization')?.scrollIntoView({ block: 'start' })}
+                    >
+                      去授权
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    icon="sync"
+                    loading={syncing}
+                    disabled={!original?.enabled}
+                    onClick={() => void syncProvider()}
+                  >
+                    同步目录与余额
+                  </Button>
+                </div>
+              ) : null}
+            </Card>
             <Card title="保存前核对">
               <ul className="check-list">
                 <li>命名空间与插件创建后不可修改。</li>
                 <li>密钥只提交新增或替换项，列表接口不会回传秘密。</li>
                 <li>自动创建令牌默认关闭，模板不完整时不会创建。</li>
-                <li>OpenAI 订阅供应商保存后，在编辑页完成设备授权。</li>
+                <li>授权前先保存配置，授权与同步都会走当前代理。</li>
                 <li>停用是软停用，历史账目保留。</li>
               </ul>
             </Card>

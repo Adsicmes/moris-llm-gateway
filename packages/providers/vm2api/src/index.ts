@@ -421,6 +421,27 @@ function estimate(price: Price, usage: Usage): Money | null {
 export const plugin: ProviderPlugin = {
   id: 'vm2api',
   name: 'vm2api',
+  setup: {
+    baseUrl: {
+      default: null,
+      hint: '没有通用默认地址，必须填写你的 vm2api 实例根地址（例如 https://vm2api.example.com）。',
+    },
+    billingType: { default: 'metered', hint: 'vm2api 不自带价格目录；按量口径记录的参考价只来自可选覆盖。' },
+    secrets: [
+      { key: 'apiKey', label: 'vm2api Key', required: true, description: 'vm2api 控制台为用户生成的 Key，用于 /v1/models、额度和推理。', placeholder: 'sk-…' },
+    ],
+    options: {
+      example: { modelsDev: true },
+      hint: '全部可选。没有价格目录时模型仍可调用，但费用显示未知，不会伪造为 0。',
+      fields: [
+        { key: 'modelsDev / modelsDevUrl / modelsDevProvider', description: '可选的原厂规格参考来源；只补齐上下文与能力。' },
+        { key: 'modelOverrides', description: '按模型 id 覆盖上下文、输出、能力、协议、变体与价格。' },
+        { key: 'quotaPool', description: '额度窗口所属池，默认 default。' },
+      ],
+    },
+    tokenTemplate: { supported: false, hint: 'vm2api 插件不创建上游令牌，令牌模板不会生效。' },
+    authorization: { supported: false, hint: 'vm2api 使用 API Key，不支持设备授权。' },
+  },
   discover,
   prepare,
   monitor,

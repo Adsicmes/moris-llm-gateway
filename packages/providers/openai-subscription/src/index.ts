@@ -1,4 +1,5 @@
 import type {
+  AuthorizationStatus,
   Balance,
   Discovery,
   Money,
@@ -841,9 +842,60 @@ function estimate(price: Price, usage: Usage): Money | null {
   return tokenCost(price, usage);
 }
 
+async function status(context: ProviderContext): Promise<AuthorizationStatus> {
+  const accessToken = asString(context.secrets.accessToken) ?? undefined;
+  const refreshToken = asString(context.secrets.refreshToken) ?? undefined;
+  const idClaims = claimsFromJwt(asString(context.secrets.idToken) ?? undefined);
+  const accessClaims = claimsFromJwt(accessToken);
+  const accountId =
+    asString(context.secrets.accountId) ?? idClaims.accountId ?? accessClaims.accountId ?? undefined;
+  const planType =
+    asString(context.secrets.planType) ?? idClaims.planType ?? accessClaims.planType ?? undefined;
+  const email = idClaims.email ?? accessClaims.email ?? undefined;
+  const expiresAt =
+    asString(context.secrets.expiresAt) ?? accessClaims.expiresAt ?? idClaims.expiresAt ?? undefined;
+  // refreshToken + accountId 才能持续刷新；只存 accessToken 不算完成授权。
+  return {
+    authorized: Boolean(refreshToken && accountId),
+    ...(accountId ? { accountId } : {}),
+    ...(planType ? { planType } : {}),
+    ...(email ? { email } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+  };
+}
+
 export const plugin: ProviderPlugin = {
   id: 'openai-subscription',
   name: 'OpenAI 订阅（ChatGPT OAuth）',
+  setup: {
+    baseUrl: {
+      default: DEFAULT_BASE_URL,
+      hint: 'ChatGPT Codex 后端地址，通常保持默认；需要走自建反代时才修改。代理请填在「网络代理」，不要写进 Base URL。',
+    },
+    billingType: { default: 'subscription', hint: '订阅账号按订阅窗口计量，不按 token 现金扣费；API 等价价值仅作参考。' },
+    secrets: [
+      { key: 'refreshToken', label: 'refreshToken', required: true, description: '设备授权成功后自动写入，用于刷新访问令牌；手工粘贴时必需。' },
+      { key: 'accountId', label: 'accountId', required: true, description: 'ChatGPT 账户 ID；授权后自动写入，也可从 id_token 的 chatgpt_account_id 读取。' },
+      { key: 'accessToken', label: 'accessToken', description: '设备授权成功后由服务端自动写入；一般不要手工填写。' },
+      { key: 'expiresAt', label: 'expiresAt', description: '访问令牌到期时间；授权或刷新时自动维护。' },
+      { key: 'planType', label: 'planType', description: '订阅套餐标识；授权后自动写入，仅用于展示。' },
+      { key: 'idToken', label: 'idToken', description: '可选。设备授权返回时自动保存，用于读取账户与套餐信息。' },
+    ],
+    options: {
+      example: { issuer: 'https://auth.openai.com', clientVersion: '0.1.0' },
+      hint: '一般留空。只有使用自建授权/反代服务时才需要覆盖 issuer、tokenUrl 或 clientId。',
+      fields: [
+        { key: 'issuer', description: '设备授权与刷新令牌的 issuer，默认 https://auth.openai.com。' },
+        { key: 'tokenUrl', description: '自定义刷新令牌地址；默认 issuer + /oauth/token。' },
+        { key: 'clientId', description: 'OAuth 客户端 ID；默认与 Codex CLI 一致。' },
+        { key: 'clientVersion', description: '/models 请求的 client_version，默认 0.1.0。' },
+        { key: 'modelsDev / modelsDevUrl / modelsDevProvider', description: '可选的原厂参考价来源；只影响参考价，不影响订阅 price=0。' },
+        { key: 'planPrice', description: '可选 {amount,currency}，用于余额页展示套餐标价。' },
+      ],
+    },
+    tokenTemplate: { supported: false, hint: 'OpenAI 订阅不创建上游 API 令牌；凭据来自设备授权，模板不会生效。' },
+    authorization: { supported: true, hint: '保存供应商后，在本页完成设备授权；授权请求也走这里的网络代理。' },
+  },
   discover,
   prepare,
   monitor,
@@ -851,6 +903,7 @@ export const plugin: ProviderPlugin = {
   authorization: {
     start: startDeviceAuthorization,
     poll: pollDeviceAuthorization,
+    status,
   },
 };
 

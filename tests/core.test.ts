@@ -141,6 +141,24 @@ test('当前窗口必须覆盖完整记录，未知attempt会使估算不可用'
     assert.equal(estimateWindow(store, 's', { ...window, usedRatio: 0 }, now).state, 'unavailable');
   } finally { store.close(); }
 });
+test('未知估算汇总返回 null，不伪装成无费用记录', () => {
+  const base: AttemptRecord = { id: 'a', requestId: 'r', accountId: 's', modelId: 'm', number: 1, startedAt: '2026-11-14T00:00:00.000Z', finishedAt: '2026-11-14T00:00:01.000Z', status: 'failed', usage: null, price: { kind: 'unknown', currency: 'USD' }, estimatedCost: { amount: 0.5, currency: 'USD' }, estimatedCny: null, settledCost: null, settledCny: null, equivalentUsd: null, usdCny: null, billingType: 'metered' };
+  assert.deepEqual(sumMoney([base], 'estimatedCost'), [{ amount: 0.5, currency: 'USD' }]);
+  assert.equal(sumMoney([base, { ...base, id: 'b', estimatedCost: null }], 'estimatedCost'), null);
+  // 全部已结算时估算为空数组（没有待估算部分），不是未知。
+  assert.deepEqual(
+    sumMoney(
+      [
+        { ...base, settledCost: { amount: 0.5, currency: 'USD' }, estimatedCost: null },
+        { ...base, id: 'b', settledCost: { amount: 0.5, currency: 'USD' }, estimatedCost: null },
+      ],
+      'estimatedCost',
+    ),
+    [],
+  );
+  assert.deepEqual(sumMoney([{ ...base, settledCost: null, estimatedCost: null }], 'settledCost'), []);
+});
+
 test('SSE处理UTF8跨块、多行与工具/推理有效输出，Anthropic缓存不漏计', () => {
   const parser = new SseDecoder(); const bytes = new TextEncoder().encode('data: {"choices":[{"delta":{"reasoning_content":"中文"}}]}\r\n\r\n');
   const first = parser.push(bytes.slice(0, bytes.length - 5)); const second = parser.push(bytes.slice(bytes.length - 5));

@@ -137,8 +137,9 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
       const intervalSeconds = Math.max(1, grant.intervalSeconds);
       authorizations.set(account.id, { grant: { ...grant, intervalSeconds }, owner: req.cookies.moris_session!, updatedAt: account.updatedAt, nextPoll: Date.now() + intervalSeconds * 1000, busy: false });
       return { verificationUrl: grant.verificationUrl, userCode: grant.userCode, expiresAt: grant.expiresAt, intervalSeconds };
-    } catch {
-      throw new GatewayError('oauth_start_failed', '无法开始授权，请检查供应商配置、代理和设备登录支持', 502);
+    } catch (error) {
+      const failure = oauthFailure(error, 'start');
+      throw new GatewayError('oauth_start_failed', failure.message, failure.status);
     } finally { startingAuthorization.delete(account.id); }
   });
   app.post('/api/admin/providers/:id/oauth/poll', async req => {
@@ -163,10 +164,24 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
         value.nextPoll = Date.now() + interval * 1000;
       }
       return result;
-    } catch {
+    } catch (error) {
       authorizations.delete(account.id);
-      throw new GatewayError('oauth_poll_failed', '授权查询失败，请重新开始授权；令牌不会返回浏览器', 502);
+      const failure = oauthFailure(error, 'poll');
+      throw new GatewayError('oauth_poll_failed', failure.message, failure.status);
     } finally { value.busy = false; }
+  });
+  app.get('/api/admin/providers/:id/authorization', async req => {
+    const account = requireAccount(store, idParam(req));
+    const auth = options.registry.get(account.plugin).authorization;
+    if (!auth) return { supported: false, authorized: false, statusKnown: false };
+    if (!auth.status) return { supported: true, authorized: false, statusKnown: false };
+    try {
+      const status = await auth.status(providers.context(account, AbortSignal.timeout(10_000)));
+      return { supported: true, statusKnown: true, ...status, checkedAt: new Date().toISOString() };
+    } catch {
+      // 不把上游错误正文或任何令牌返回浏览器。
+      throw new GatewayError('oauth_status_failed', '无法读取授权状态；令牌不会返回浏览器，请稍后重试', 502);
+    }
   });
   app.get('/api/admin/models', async () => ({ items: store.models().map(model => ({ ...model, enabled: providers.callable(model), disabledReason: providers.callable(model) ? undefined : model.disabledReason ?? '目录过期或供应商已停用' })) }));
   const parameterState = (id: string) => {
@@ -254,4 +269,42 @@ function requireAccount(store: Store, id: string): ProviderAccount { const accou
 function roundCny(value: number): number { return Math.round(value * 100) / 100; }
 function publicProxy(value: string | undefined): string | undefined {
   if (!value) return undefined; const url = new URL(value); url.username = ''; url.password = ''; return url.href;
+}
+/** 按插件错误代码给出可执行的失败原因，绝不回传上游错误正文或令牌。 */
+function oauthFailure(error: unknown, stage: 'start' | 'poll'): { message: string; status: number } {
+  const value = error as { code?: unknown; status?: unknown } | null;
+  const code = typeof value?.code === 'string' ? value.code : '';
+  const upstream = typeof value?.status === 'number' && value.status >= 400 ? value.status : 502;
+  if (code === 'aborted') return { message: '授权请求超时或被取消，请检查网络后重试', status: 504 };
+  if (code === 'network') {
+    return {
+      message: '无法连接授权服务：请检查供应商网络代理是否可达（容器内不要使用 127.0.0.1；宿主代理用 host.docker.internal:端口），保存配置后再发起授权',
+      status: 502,
+    };
+  }
+  if (code === 'device_flow_unavailable') {
+    return { message: '该授权地址未启用设备码登录；请核对 options.issuer 或改用受支持的 OpenAI 授权地址', status: 400 };
+  }
+  if (code === 'device_flow_failed' && upstream === 429) {
+    return { message: '授权服务限流（HTTP 429），请等待一段时间后重试', status: 429 };
+  }
+  if (code === 'device_flow_failed') {
+    return { message: `授权服务返回 HTTP ${upstream}；请检查代理、issuer 与客户端 ID 后重试`, status: 502 };
+  }
+  if (code === 'oauth_refresh_rejected' || code === 'oauth_exchange_rejected') {
+    return { message: '授权服务拒绝了令牌交换；一次性代码可能已失效或账号权限不足，请重新开始授权', status: 502 };
+  }
+  if (code === 'account_id_missing') {
+    return { message: '授权令牌缺少 chatgpt_account_id；请确认授权账号属于 ChatGPT 订阅并重新授权', status: 502 };
+  }
+  if (code === 'invalid_response') {
+    return { message: '授权服务返回了无法解析的响应；请检查代理是否改写了响应，或稍后重试', status: 502 };
+  }
+  return {
+    message:
+      stage === 'start'
+        ? '无法开始授权：请确认供应商已保存、代理可达且 issuer 配置正确；服务端未返回敏感错误正文'
+        : '授权查询失败：一次性代码可能已过期或网络中断，请重新开始授权；服务端未返回敏感错误正文',
+    status: 502,
+  };
 }

@@ -46,12 +46,22 @@ export function estimateWindow(store: Store, accountId: string, window: QuotaWin
   const totalUsd = spentUsd / window.usedRatio;
   return { ...result, state: 'ok', spentUsd, totalUsd, remainingUsd: Math.max(0, totalUsd - spentUsd) };
 }
-export function sumMoney(attempts: AttemptRecord[], kind: 'estimatedCost' | 'settledCost'): Money[] {
+/**
+ * 按币种汇总费用。估算口径下，只要有参与汇总的 attempt 费用未知就返回 null
+ * （未知不能变成“无费用记录”）；已结算口径的 null 表示尚未结算，仍返回空数组。
+ */
+export function sumMoney(attempts: AttemptRecord[], kind: 'estimatedCost' | 'settledCost'): Money[] | null {
   const sums = new Map<Money['currency'], number>();
+  let unknown = false;
   for (const attempt of attempts) {
     // 估算只汇总未结算部分，已结算请求不会被再次计入待对账估算。
-    const money = kind === 'estimatedCost' && attempt.settledCost ? null : attempt[kind];
-    if (money) sums.set(money.currency, (sums.get(money.currency) ?? 0) + money.amount);
+    if (kind === 'estimatedCost' && attempt.settledCost) continue;
+    const money = attempt[kind];
+    if (!money) {
+      if (kind === 'estimatedCost') unknown = true;
+      continue;
+    }
+    sums.set(money.currency, (sums.get(money.currency) ?? 0) + money.amount);
   }
-  return [...sums].map(([currency, amount]) => ({ currency, amount }));
+  return unknown ? null : [...sums].map(([currency, amount]) => ({ currency, amount }));
 }

@@ -42,6 +42,8 @@ export function ProvidersPage() {
   const [disabling, setDisabling] = useState(false);
 
   const pluginName = (id: string) => plugins.data?.items.find((plugin) => plugin.id === id)?.name ?? id;
+  const needsAuthorization = (id: string) =>
+    plugins.data?.items.find((plugin) => plugin.id === id)?.setup?.authorization?.supported === true;
 
   const syncProvider = async (id: string) => {
     setSyncState((current) => ({ ...current, [id]: { busy: true } }));
@@ -96,7 +98,8 @@ export function ProvidersPage() {
       />
 
       <InlineNote>
-        停用是软停用：保留历史请求与账目，不删除上游账号。目录与额度的完整刷新由每条供应商的「同步」触发，失败时保留上一次成功快照。
+        停用是软停用：保留历史请求与账目，不删除上游账号。新增供应商会直接进入编辑页，按「接入步骤」先保存、再授权（如插件支持）、同步目录，最后到模型目录核对。
+        目录与额度的完整刷新由每条供应商的「同步」触发，失败时保留上一次成功快照。
       </InlineNote>
 
       <div className="card">
@@ -179,6 +182,11 @@ export function ProvidersPage() {
                             ) : null}
                             {feedback?.error ? <span className="small danger-text">{feedback.error}</span> : null}
                             {feedback?.result?.error ? <span className="small danger-text">{feedback.result.error}</span> : null}
+                            {needsAuthorization(provider.plugin) ? (
+                              <Link className="small text-link" to={{ name: 'provider-edit', id: provider.id }}>
+                                授权 / 检查接入步骤
+                              </Link>
+                            ) : null}
                           </div>
                         </td>
                         <td className="nowrap small">{formatDateTime(provider.updatedAt)}</td>

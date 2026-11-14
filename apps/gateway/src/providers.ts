@@ -13,7 +13,9 @@ export class ProviderRegistry {
   get(id: string): ProviderPlugin {
     const plugin = this.plugins.get(id); if (!plugin) throw new Error(`供应商插件未安装: ${id}`); return plugin;
   }
-  list(): Array<{ id: string; name: string }> { return [...this.plugins.values()].map(({ id, name }) => ({ id, name })); }
+  list(): Array<{ id: string; name: string; setup?: ProviderPlugin['setup'] }> {
+    return [...this.plugins.values()].map(({ id, name, setup }) => ({ id, name, ...(setup ? { setup } : {}) }));
+  }
 }
 export class Providers {
   private pending = new Map<string, Promise<{ ok: boolean; state: string; error?: string }>>();

@@ -920,6 +920,36 @@ function estimate(price: Price, usage: Usage, body: Record<string, unknown>): Mo
 export const plugin: ProviderPlugin = {
   id: 'realseek',
   name: 'New API 兼容站点',
+  setup: {
+    baseUrl: {
+      default: null,
+      hint: '没有通用默认地址，必须填写你的 New API 站点根地址（例如 https://newapi.example.com，可带或不带 /v1）。',
+    },
+    billingType: { default: 'metered', hint: '按站点 /api/pricing 的倍率计费；订阅制站点不要用此插件。' },
+    secrets: [
+      { key: 'accessToken', label: 'accessToken', required: true, description: 'New API 管理接口登录令牌；目录、分组与令牌列表都依赖它。缺少时目录不完整。' },
+      { key: 'userId', label: 'userId', description: '可选。New-API-User 请求头；缺省时从 accessToken 的 JWT 读取。' },
+      { key: 'apiKey', label: 'apiKey', description: '可选。仅当 options.apiKeyGroup 与当前分组一致时作为推理密钥。' },
+      { key: 'token:<group>', label: 'token:<分组>', description: '自动创建或手工填写时按分组保存；插件优先复用名称匹配的 moris 令牌，不修改其他令牌。', placeholder: 'token:default' },
+    ],
+    options: {
+      example: { modelsDev: true, modelsDevOfficial: true },
+      hint: '全部可选。用 apiKeyGroup 指定 apiKey 所属分组；allowUserTokens 默认 false，不会改用非本网关创建的令牌。',
+      fields: [
+        { key: 'apiKeyGroup', description: 'secrets.apiKey 所属分组；只有该分组会使用 apiKey。' },
+        { key: 'quotaPerUnit', description: '站点 /api/status 缺少 quota_per_unit 时的兜底单位。' },
+        { key: 'allowUserTokens', description: '默认 false；设 true 才允许复用名称不匹配的既有令牌。' },
+        { key: 'managedTokenPrefix', description: '识别本网关令牌的名称前缀；默认取令牌模板的 namePrefix。' },
+        { key: 'modelOverrides', description: '按 group/model 覆盖上下文、输出、能力、协议与变体；只影响网关展示与校验。' },
+        { key: 'modelsDev / modelsDevUrl / modelsDevProvider / modelsDevOfficial', description: '可选的原厂参考价与规格来源；不覆盖站点实际价格。' },
+      ],
+    },
+    tokenTemplate: {
+      supported: true,
+      hint: '开启后按「名称前缀-分组」创建专用令牌，并优先复用匹配前缀的既有令牌；名称前缀建议保留 moris。不会使用、修改或删除其他令牌。',
+    },
+    authorization: { supported: false, hint: 'New API 使用管理令牌，不支持设备授权。' },
+  },
   discover,
   prepare,
   monitor,

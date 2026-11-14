@@ -1,5 +1,35 @@
-import type { Money, Price, Protocol, ProviderAccount, ProviderModel, ProviderMonitor, Usage } from '../../contracts/src/index.js';
+import type { BillingType, Money, Price, Protocol, ProviderAccount, ProviderModel, ProviderMonitor, Usage } from '../../contracts/src/index.js';
 export type * from '../../contracts/src/index.js';
+/** 插件声明的配置字段说明；只包含非秘密的展示元数据。 */
+export interface ProviderSecretField {
+  key: string;
+  label: string;
+  required?: boolean;
+  description: string;
+  placeholder?: string;
+}
+export interface ProviderSetup {
+  /** 推荐 Base URL；null 表示没有通用默认地址，必须由管理员填写。 */
+  baseUrl?: { default: string | null; hint: string };
+  /** 推荐计费类型与计费口径说明。 */
+  billingType?: { default: BillingType; hint: string };
+  secrets?: ProviderSecretField[];
+  options?: {
+    example?: Record<string, unknown>;
+    hint: string;
+    fields?: Array<{ key: string; description: string }>;
+  };
+  /** 上游令牌模板是否受插件支持，以及填写规则。 */
+  tokenTemplate?: { supported: boolean; hint: string };
+  authorization?: { supported: boolean; hint: string };
+}
+export interface AuthorizationStatus {
+  authorized: boolean;
+  accountId?: string;
+  planType?: string;
+  email?: string;
+  expiresAt?: string;
+}
 export interface ProviderContext {
   account: ProviderAccount;
   secrets: Record<string, string>;
@@ -30,6 +60,8 @@ export interface Settlement {
 export interface ProviderPlugin {
   id: string;
   name: string;
+  /** 后台表单的插件专属默认值与字段说明。 */
+  setup?: ProviderSetup;
   discover(context: ProviderContext): Promise<Discovery>;
   prepare(context: ProviderContext, model: ProviderModel, body: Record<string, unknown>, protocol: Protocol): Promise<PreparedRequest>;
   monitor?(context: ProviderContext): Promise<ProviderMonitor>;
@@ -39,6 +71,8 @@ export interface ProviderPlugin {
   authorization?: {
     start(context: ProviderContext): Promise<DeviceAuthorization>;
     poll(context: ProviderContext, grant: DeviceAuthorization): Promise<AuthorizationResult>;
+    /** 只读取已保存的非秘密授权状态，用于刷新后的状态回显。 */
+    status?(context: ProviderContext): Promise<AuthorizationStatus>;
   };
 }
 export interface DeviceAuthorization {

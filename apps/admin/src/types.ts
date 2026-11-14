@@ -28,15 +28,49 @@ export interface Overview {
   equivalentUsd: number | null;
   unknownAttempts: number;
   unknownEquivalentAttempts: number;
-  /** 服务端按币种汇总的估算费用；可能同时包含 USD 与 CNY。 */
-  estimatedCost: Money[];
-  /** 服务端按币种汇总的真实结算费用；可能同时包含 USD 与 CNY。 */
+  /** 服务端按币种汇总的估算费用；null 表示存在未知估算，不能当作无费用记录。 */
+  estimatedCost: Money[] | null;
+  /** 服务端按币种汇总的真实结算费用；空数组表示暂无结算记录。 */
   settledCost: Money[];
+}
+
+export interface PluginSecretField {
+  key: string;
+  label: string;
+  required?: boolean;
+  description: string;
+  placeholder?: string;
+}
+
+/** GET /api/admin/plugins；只含非秘密的表单元数据。 */
+export interface PluginSetup {
+  baseUrl?: { default: string | null; hint: string };
+  billingType?: { default: BillingType; hint: string };
+  secrets?: PluginSecretField[];
+  options?: {
+    example?: Record<string, unknown>;
+    hint: string;
+    fields?: Array<{ key: string; description: string }>;
+  };
+  tokenTemplate?: { supported: boolean; hint: string };
+  authorization?: { supported: boolean; hint: string };
 }
 
 export interface PluginInfo {
   id: string;
   name: string;
+  setup?: PluginSetup;
+}
+
+export interface ProviderAuthorizationStatus {
+  supported: boolean;
+  statusKnown: boolean;
+  authorized: boolean;
+  accountId?: string;
+  planType?: string;
+  email?: string;
+  expiresAt?: string;
+  checkedAt?: string;
 }
 
 export interface ProvidersResponse {

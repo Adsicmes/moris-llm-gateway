@@ -13,7 +13,19 @@ async function fixture(fetcher: typeof fetch) {
   const model: ProviderModel = { path: 'g/m', upstreamModel: 'm', name: 'M', family: 'm', protocol: 'chat-completions', capabilities: { tools: true, input: ['text', 'image'], output: ['text'] }, limit: { context: 10000, output: 1000 }, variants: {}, price: { kind: 'token', currency: 'USD', input: 1, output: 2 } };
   store.saveAccount(account, { apiKey: 'upstream-secret' }); store.replaceCatalog(account, [model], new Date().toISOString());
   const registry = new ProviderRegistry();
-  registry.register({ id: 'test', name: 'test', discover: async () => ({ complete: true, models: [model] }), prepare: async (ctx, m, body) => ({ url: 'https://upstream.test/v1/chat/completions', headers: { authorization: `Bearer ${ctx.secrets.apiKey}` }, body: { ...body, model: m.upstreamModel } }) });
+  registry.register({
+    id: 'test',
+    name: 'test',
+    setup: {
+      baseUrl: { default: 'https://upstream.test', hint: '测试用推荐地址' },
+      billingType: { default: 'metered', hint: '测试按量计费' },
+      secrets: [{ key: 'apiKey', label: '测试密钥', required: true, description: '测试说明' }],
+      tokenTemplate: { supported: true, hint: '测试模板' },
+      authorization: { supported: false, hint: '测试不支持授权' },
+    },
+    discover: async () => ({ complete: true, models: [model] }),
+    prepare: async (ctx, m, body) => ({ url: 'https://upstream.test/v1/chat/completions', headers: { authorization: `Bearer ${ctx.secrets.apiKey}` }, body: { ...body, model: m.upstreamModel } }),
+  });
   const device = store.createDevice('test');
   const app = await createApp({ store, registry, fetch: fetcher, secureCookie: false, background: false });
   return { app, store, headers: { authorization: `Bearer ${device.key}` }, close: async () => { await app.close(); store.close(); } };
@@ -70,6 +82,25 @@ test('协议不匹配和过期目录在发出上游前拒绝', async () => {
     assert.equal((await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m' } })).statusCode, 503);
     assert.equal(calls, 0);
   } finally { await f.close(); }
+});
+
+test('插件元数据只暴露默认值与字段说明，不暴露凭据', async () => {
+  const f = await fixture(fetch);
+  try {
+    const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'a-test-password-only' } });
+    const headers = { cookie: String(login.headers['set-cookie']).split(';')[0]! };
+    const response = await f.app.inject({ url: '/api/admin/plugins', headers });
+    assert.equal(response.statusCode, 200);
+    const plugin = response.json().items[0];
+    assert.equal(plugin.id, 'test');
+    assert.equal(plugin.setup.baseUrl.default, 'https://upstream.test');
+    assert.equal(plugin.setup.billingType.default, 'metered');
+    assert.equal(plugin.setup.secrets[0].key, 'apiKey');
+    assert.equal(plugin.setup.authorization.supported, false);
+    assert.ok(!response.body.includes('upstream-secret'));
+  } finally {
+    await f.close();
+  }
 });
 
 test('令牌模板支持长期有效并拒绝负数或小数天数', async () => {

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../auth';
-import type { OAuthPollResponse, OAuthStartResponse, SyncResult } from '../types';
+import type {
+  OAuthPollResponse,
+  OAuthStartResponse,
+  ProviderAuthorizationStatus,
+  SyncResult,
+} from '../types';
 import { describeError } from '../lib/api';
 import { formatDateTime } from '../lib/format';
 import {
@@ -43,14 +48,19 @@ export function OpenAIProviderAuth({
   providerName,
   onAuthorized,
   onSynced,
+  onStatusChange,
 }: {
   providerId: string;
   providerName: string;
   onAuthorized?: () => void;
   onSynced?: () => void;
+  onStatusChange?: (status: ProviderAuthorizationStatus | null) => void;
 }) {
   const api = useApi();
   const toast = useToast();
+  const [status, setStatus] = useState<ProviderAuthorizationStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
   const [phase, setPhase] = useState<Phase>('idle');
   const [startInfo, setStartInfo] = useState<OAuthStartResponse | null>(null);
   const [complete, setComplete] = useState<Extract<OAuthPollResponse, { state: 'complete' }> | null>(null);
@@ -69,8 +79,40 @@ export function OpenAIProviderAuth({
   const runPollRef = useRef<(generation: number) => void>(() => {});
   const onAuthorizedRef = useRef(onAuthorized);
   const onSyncedRef = useRef(onSynced);
+  const onStatusChangeRef = useRef(onStatusChange);
   onAuthorizedRef.current = onAuthorized;
   onSyncedRef.current = onSynced;
+  onStatusChangeRef.current = onStatusChange;
+
+  const loadStatus = useCallback(
+    async (signal?: AbortSignal) => {
+      setStatusLoading(true);
+      setStatusError(null);
+      try {
+        const value = await api<ProviderAuthorizationStatus>(
+          `/api/admin/providers/${encodeURIComponent(providerId)}/authorization`,
+          { signal },
+        );
+        if (signal?.aborted) return;
+        setStatus(value);
+        onStatusChangeRef.current?.(value);
+      } catch (reason) {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return;
+        if (signal?.aborted) return;
+        setStatusError(describeError(reason));
+        onStatusChangeRef.current?.(null);
+      } finally {
+        if (!signal?.aborted) setStatusLoading(false);
+      }
+    },
+    [api, providerId],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadStatus(controller.signal);
+    return () => controller.abort();
+  }, [loadStatus]);
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -128,6 +170,7 @@ export function OpenAIProviderAuth({
         setNow(Date.now());
         toast.push('OpenAI 订阅授权完成。');
         onAuthorizedRef.current?.();
+        void loadStatus();
         return;
       }
 
@@ -278,21 +321,85 @@ export function OpenAIProviderAuth({
   const remainingSeconds = startInfo ? Math.max(0, Math.ceil((Date.parse(startInfo.expiresAt) - now) / 1000)) : 0;
 
   return (
-    <Card title="授权 OpenAI 订阅">
+    <Card title="授权 OpenAI 订阅" id="provider-authorization">
       <div className="oauth-panel">
         <p className="card-lead">
           通过设备授权把 <strong>{providerName}</strong> 的订阅账号连接到服务端。设备授权 ID 与令牌只保存在服务器；浏览器只显示一次性代码、授权链接和到期时间。
         </p>
 
+        <div className="oauth-current" aria-live="polite">
+          {statusLoading ? (
+            <p className="small muted">正在读取已保存的授权状态…</p>
+          ) : statusError ? (
+            <InlineNote tone="warn">授权状态读取失败：{statusError}。这不影响重新发起授权。</InlineNote>
+          ) : status ? (
+            <>
+              <div className="oauth-status">
+                <Badge tone={status.authorized ? 'ok' : 'neutral'}>
+                  {status.statusKnown ? (status.authorized ? '已授权' : '未授权') : '授权状态未知'}
+                </Badge>
+                <span className="small muted">
+                  {status.statusKnown
+                    ? status.authorized
+                      ? '刷新页面后仍会显示此状态；重新授权会替换服务端令牌。'
+                      : '还没有可用的 refreshToken 与账户 ID，请完成一次设备授权。'
+                    : '该插件未提供可读取的授权状态；请重新授权或检查服务端日志。'}
+                </span>
+              </div>
+              {status.statusKnown ? (
+                <dl className="meta-list oauth-meta">
+                  {status.accountId ? (
+                    <div>
+                      <dt>账户 ID</dt>
+                      <dd className="mono break">{status.accountId}</dd>
+                    </div>
+                  ) : null}
+                  {status.planType ? (
+                    <div>
+                      <dt>套餐</dt>
+                      <dd>{status.planType}</dd>
+                    </div>
+                  ) : null}
+                  {status.email ? (
+                    <div>
+                      <dt>账号邮箱</dt>
+                      <dd className="break">{status.email}</dd>
+                    </div>
+                  ) : null}
+                  {status.expiresAt ? (
+                    <div>
+                      <dt>访问令牌到期</dt>
+                      <dd>{formatDateTime(status.expiresAt)}</dd>
+                    </div>
+                  ) : null}
+                  {status.checkedAt ? (
+                    <div>
+                      <dt>检查时间</dt>
+                      <dd>{formatDateTime(status.checkedAt)}</dd>
+                    </div>
+                  ) : null}
+                </dl>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+
         {phase === 'idle' ? (
           <>
             <InlineNote>
-              点击后才会向 OpenAI 发起设备授权。完成后可同步模型目录与额度；未完成前不会创建上游令牌。
+              {status?.authorized
+                ? '当前已有授权。可先同步目录与额度；只有需要更换账号或令牌失效时才重新授权。'
+                : '点击后才会向 OpenAI 发起设备授权。若配置了网络代理，请先在页面上保存，再发起授权；未完成前不会创建上游令牌。'}
             </InlineNote>
             <div className="oauth-actions">
               <Button variant="primary" onClick={() => void start()}>
-                开始设备授权
+                {status?.authorized ? '重新授权' : '开始设备授权'}
               </Button>
+              {status?.authorized ? (
+                <Button variant="secondary" icon="refresh" onClick={() => void loadStatus()}>
+                  重新读取状态
+                </Button>
+              ) : null}
             </div>
           </>
         ) : null}

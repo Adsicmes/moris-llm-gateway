@@ -23,7 +23,10 @@
   --p-bad: #ff9d9d;
   --p-info: #9bc8ff;
   --p-line: rgba(255, 255, 255, 0.09);
-  --p-line-strong: rgba(255, 255, 255, 0.3);
+  /* 非文本边界至少 3:1；0.42 白叠加在 #0f0f0f 上约为 #707070。 */
+  --p-line-strong: rgba(255, 255, 255, 0.42);
+  /* 表单控件边界：在 #101010 上 3.84:1，在深色弹窗 #171717 上 3.62:1。 */
+  --p-control-border: #707070;
   --p-danger-soft: rgba(255, 157, 157, 0.1);
   --p-warn-soft: rgba(242, 198, 109, 0.1);
   --p-ok-soft: rgba(165, 227, 174, 0.1);
@@ -725,7 +728,7 @@ code {
   width: 100%;
   height: 42px;
   padding: 0 12px;
-  border: 1px solid var(--p-line-strong);
+  border: 1px solid var(--p-control-border);
   border-radius: var(--r-sm);
   background: #101010;
   color: var(--p-ink-strong);
@@ -740,7 +743,7 @@ code {
 }
 
 .input:hover {
-  border-color: rgba(255, 255, 255, 0.28);
+  border-color: #8a8a8a;
 }
 
 .input:focus {
@@ -762,10 +765,6 @@ code {
 /* 编辑器位于深色弹窗内，控件边界对比度保持至少 3:1。 */
 .model-parameter-form {
   --p-control-border: #707070;
-}
-
-.model-parameter-form .input:not(:focus):not([aria-invalid="true"]) {
-  border-color: var(--p-control-border);
 }
 
 .textarea {
@@ -845,6 +844,66 @@ code {
 
 .form-note {
   margin-top: 14px;
+}
+
+.form-note--top {
+  margin-top: 0;
+  margin-bottom: 14px;
+}
+
+.secret-guide {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: var(--p-surface-2);
+  border: 1px solid var(--p-line);
+  border-radius: var(--r-md);
+}
+
+.secret-guide h3 {
+  font-size: 13px;
+  color: var(--p-ink);
+  margin-bottom: 8px;
+}
+
+.step-list {
+  list-style: decimal;
+  padding-left: 18px;
+}
+
+.step-list li {
+  padding-left: 2px;
+}
+
+.step-list li::before {
+  display: none;
+}
+
+.client-config {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.client-config h3 {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.client-config .code-block {
+  margin: 10px 0;
+  max-height: 260px;
+}
+
+.model-repair {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+@media (max-width: 760px) {
+  .client-config {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .form-grid + .checkbox,
@@ -1300,11 +1359,16 @@ code {
 }
 
 .cell-note {
-  max-width: 250px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 320px;
   color: var(--p-muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.expandable-text__toggle {
+  margin-left: 6px;
+  color: var(--p-accent);
+  font-size: 12px;
 }
 
 .nowrap {

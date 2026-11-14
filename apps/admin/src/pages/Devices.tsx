@@ -7,6 +7,7 @@ import { useAsync } from '../lib/useAsync';
 import {
   Badge,
   Button,
+  Card,
   ConfirmDialog,
   CopyButton,
   EmptyState,
@@ -77,6 +78,22 @@ export function DevicesPage() {
 
   const items = devices.data?.items ?? [];
   const active = items.filter((device) => !device.revokedAt).length;
+  const origin = window.location.origin;
+  const opencodeSnippet = `{
+  "plugins": [
+    {
+      "package": "@moris/opencode-plugin",
+      "options": {
+        "baseUrl": "${origin}",
+        "apiKey": "<设备密钥>"
+      }
+    }
+  ]
+}`;
+  const openchamberSnippet = `{
+  "baseUrl": "${origin}",
+  "apiKey": "<设备密钥>"
+}`;
 
   return (
     <div className="page">
@@ -98,6 +115,28 @@ export function DevicesPage() {
       <InlineNote>
         设备密钥可调用 /v1 接口、读取目录与额度，但不授予任何后台管理权限。撤销立即生效；已产生的历史请求与账目保留。
       </InlineNote>
+
+      <Card title="客户端接入">
+        <div className="client-config">
+          <section>
+            <h3>OpenCode v2</h3>
+            <p className="small muted">写入全局或项目的 <code>opencode.jsonc</code>。把 <code>&lt;设备密钥&gt;</code> 换成刚创建的密钥。</p>
+            <pre className="code-block">{opencodeSnippet}</pre>
+            <CopyButton text={opencodeSnippet} label="复制 OpenCode 配置" />
+          </section>
+          <section>
+            <h3>OpenChamber Work Status</h3>
+            <p className="small muted">
+              保存为扩展服务数据目录下的 <code>config.json</code>（<code>{'{OPENCHAMBER_SERVICE_DATA_DIR}'}/config.json</code>）；也可复用上面的 OpenCode 配置。
+            </p>
+            <pre className="code-block">{openchamberSnippet}</pre>
+            <CopyButton text={openchamberSnippet} label="复制 OpenChamber 配置" />
+          </section>
+        </div>
+        <p className="quiet-note">
+          每台设备单独创建密钥；不要把密钥提交到仓库、写进日志或发给其他人。撤销某把密钥只影响对应设备。
+        </p>
+      </Card>
 
       <div className="mini-stats">
         <div>
@@ -244,6 +283,9 @@ export function DevicesPage() {
               <CopyButton text={issued.key} label="复制密钥" />
               <span className="small muted">关闭后此值会从页面内存清除。</span>
             </div>
+            <p className="small muted">
+              然后到上方「客户端接入」复制模板，把 <code>&lt;设备密钥&gt;</code> 替换为这把密钥。
+            </p>
           </div>
         ) : null}
       </Modal>

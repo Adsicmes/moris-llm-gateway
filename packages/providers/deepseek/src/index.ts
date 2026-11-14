@@ -347,6 +347,20 @@ function estimate(): Money | null {
 export const plugin: ProviderPlugin = {
   id: 'deepseek',
   name: 'DeepSeek 官方',
+  setup: {
+    baseUrl: { default: DEFAULT_BASE_URL, hint: '官方 API 根地址；通常不需要 /v1，插件会按协议拼接路径。' },
+    billingType: { default: 'metered', hint: '按 token 计费；订阅账号请勿选此插件。' },
+    secrets: [
+      { key: 'apiKey', label: 'DeepSeek API Key', required: true, description: '在 DeepSeek 控制台创建，用于 /models、余额查询与推理。', placeholder: 'sk-…' },
+    ],
+    options: {
+      example: { protocol: 'chat-completions' },
+      hint: '可选。protocol 只能是 chat-completions、responses 或 messages，决定该供应商同步出的协议路径。',
+      fields: [{ key: 'protocol', description: '默认 chat-completions；除非模型与端点已核实，不要修改。' }],
+    },
+    tokenTemplate: { supported: false, hint: 'DeepSeek 官方插件不创建上游令牌，也无需填写令牌模板。' },
+    authorization: { supported: false, hint: 'DeepSeek 使用 API Key，不支持设备授权。' },
+  },
   discover,
   prepare,
   monitor,

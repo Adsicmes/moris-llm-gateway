@@ -36,15 +36,24 @@ export function dateInputToIso(value: string): string {
   return new Date(`${value}T00:00:00+08:00`).toISOString();
 }
 
+/** 保留非零微小金额的可读精度：至少 6 位，且保证不因四舍五入显示为 0。 */
+function fractionDigits(amount: number, precise: boolean): number {
+  if (!precise) return 2;
+  const abs = Math.abs(amount);
+  if (abs === 0) return 2;
+  if (abs >= 1) return 2;
+  if (abs >= 0.01) return 4;
+  return Math.min(12, Math.max(6, Math.floor(-Math.log10(abs)) + 2));
+}
+
 export function formatAmount(amount: number, currency?: string, precise = true): string {
   const symbol = currency === 'CNY' ? '¥' : currency === 'USD' ? '$' : '';
-  const digits = precise
-    ? Math.abs(amount) > 0 && Math.abs(amount) < 0.01
-      ? 6
-      : Math.abs(amount) < 1
-        ? 4
-        : 2
-    : 2;
+  if (!Number.isFinite(amount)) return '未知';
+  const digits = fractionDigits(amount, precise);
+  // 极端小但仍非零的金额不能显示成 0；改用科学计数法保留量级。
+  if (precise && amount !== 0 && Number(amount.toFixed(digits)) === 0) {
+    return `${symbol}${amount.toExponential(2)}${currency && !symbol ? ` ${currency}` : ''}`;
+  }
   const formatted = new Intl.NumberFormat('zh-CN', {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,

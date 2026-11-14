@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useApi } from '../auth';
 import type { CatalogModel, ModelParameterOverrides, ModelParameterState } from '../lib/contracts';
 import { describeError } from '../lib/api';
@@ -24,7 +24,15 @@ function automaticValue(model: CatalogModel, key: Key): string {
   return value === undefined ? '未知' : value ? '支持' : '不支持';
 }
 
-function ParameterForm({ initial, onSaved }: { initial: ModelParameterState; onSaved: (model: CatalogModel) => void }) {
+function ParameterForm({
+  initial,
+  onSaved,
+  onDirtyChange,
+}: {
+  initial: ModelParameterState;
+  onSaved: (model: CatalogModel) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const api = useApi();
   const [state, setState] = useState(initial);
   const [draft, setDraft] = useState(() => draftOf(initial.overrides));
@@ -34,6 +42,14 @@ function ParameterForm({ initial, onSaved }: { initial: ModelParameterState; onS
   const [busy, setBusy] = useState(false);
   const endpoint = `/api/admin/models/${encodeURIComponent(state.automatic.id)}/parameters`;
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(state.overrides));
+  const dirtyChangeRef = useRef(onDirtyChange);
+  dirtyChangeRef.current = onDirtyChange;
+
+  useEffect(() => {
+    dirtyChangeRef.current?.(dirty);
+  }, [dirty]);
+
+  useEffect(() => () => dirtyChangeRef.current?.(false), []);
 
   async function save(overrides: ModelParameterOverrides) {
     setBusy(true); setError(''); setNotice('');
@@ -74,6 +90,7 @@ function ParameterForm({ initial, onSaved }: { initial: ModelParameterState; onS
     void save(next);
   }
   async function reload() {
+    if (dirty && !window.confirm('重新读取会放弃未保存的参数修改。确定继续吗？')) return;
     setBusy(true); setError(''); setNotice('');
     try {
       const next = await api<ModelParameterState>(endpoint);
@@ -105,6 +122,7 @@ function ParameterForm({ initial, onSaved }: { initial: ModelParameterState; onS
     <div role="status">{notice}</div>
     <FormActions>
       <Button type="button" disabled={busy || (!dirty && !Object.keys(state.overrides).length)} onClick={() => {
+        if (dirty && !window.confirm('当前有未保存的修改，恢复全部自动值会清空这些修改。确定继续吗？')) return;
         setDraft(draftOf({})); setErrors({}); setError(''); setNotice('已清空表单中的覆盖值；点击“保存参数”后恢复自动值。');
       }}>恢复全部自动值</Button>
       <Button type="button" disabled={busy} onClick={() => { void reload(); }}>重新读取参数</Button>
@@ -114,10 +132,18 @@ function ParameterForm({ initial, onSaved }: { initial: ModelParameterState; onS
   </form>;
 }
 
-export function ModelParameters({ modelId, onSaved }: { modelId: string; onSaved: (model: CatalogModel) => void }) {
+export function ModelParameters({
+  modelId,
+  onSaved,
+  onDirtyChange,
+}: {
+  modelId: string;
+  onSaved: (model: CatalogModel) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const api = useApi();
   const state = useAsync(signal => api<ModelParameterState>(`/api/admin/models/${encodeURIComponent(modelId)}/parameters`, { signal }), [modelId]);
   if (state.error) return <ErrorState error={state.error} onRetry={state.reload} />;
   if (!state.data) return <SkeletonRows rows={3} />;
-  return <ParameterForm key={modelId} initial={state.data} onSaved={onSaved} />;
+  return <ParameterForm key={modelId} initial={state.data} onSaved={onSaved} onDirtyChange={onDirtyChange} />;
 }

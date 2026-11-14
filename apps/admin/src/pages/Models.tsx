@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useApi } from '../auth';
-import type { ModelsResponse } from '../types';
+import type { ModelsResponse, Settings } from '../types';
 import type { CatalogModel, Price } from '../lib/contracts';
-import { formatDateTime, formatMoneyList, prettyJson } from '../lib/format';
+import { formatDateTime, formatMoneyList, formatMs, prettyJson } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 import { Link } from '../router';
 import { ModelParameters } from './ModelParameters';
@@ -79,7 +79,17 @@ function capabilities(model: CatalogModel) {
   return items;
 }
 
-function ModelDetail({ model, onClose, onSaved }: { model: CatalogModel | null; onClose: () => void; onSaved: (model: CatalogModel) => void }) {
+function ModelDetail({
+  model,
+  onClose,
+  onSaved,
+  onDirtyChange,
+}: {
+  model: CatalogModel | null;
+  onClose: () => void;
+  onSaved: (model: CatalogModel) => void;
+  onDirtyChange: (dirty: boolean) => void;
+}) {
   return (
     <Modal
       open={model !== null}
@@ -98,9 +108,23 @@ function ModelDetail({ model, onClose, onSaved }: { model: CatalogModel | null; 
               <Badge key={item}>{item}</Badge>
             ))}
           </div>
-          {!model.enabled && model.disabledReason ? <InlineNote tone="warn">停用原因：{model.disabledReason}</InlineNote> : null}
+          {!model.enabled ? (
+            <div className="model-repair">
+              <InlineNote tone="warn">
+                停用原因：{model.disabledReason ?? '目录过期、供应商停用或参数不完整。'}
+                <br />
+                修复路径：到供应商页保存并同步目录；若是本网关参数覆盖导致，直接在下方「参数编辑」修正并保存。
+              </InlineNote>
+              <div className="oauth-actions">
+                <Link className="btn btn--secondary btn--sm" to={{ name: 'providers' }}>
+                  去供应商页同步 / 启用
+                </Link>
+                <span className="small muted">同步成功后回到本页刷新，停用状态会自动更新。</span>
+              </div>
+            </div>
+          ) : null}
 
-          <ModelParameters key={model.id} modelId={model.id} onSaved={onSaved} />
+          <ModelParameters key={model.id} modelId={model.id} onSaved={onSaved} onDirtyChange={onDirtyChange} />
 
           <div className="detail-grid">
             <div>
@@ -198,11 +222,26 @@ function ModelDetail({ model, onClose, onSaved }: { model: CatalogModel | null; 
 export function ModelsPage() {
   const api = useApi();
   const models = useAsync((signal) => api<ModelsResponse>('/api/admin/models', { signal }), []);
+  const settings = useAsync((signal) => api<Settings>('/api/admin/settings', { signal }), []);
   const [search, setSearch] = useState('');
   const [account, setAccount] = useState('all');
   const [protocol, setProtocol] = useState('all');
   const [state, setState] = useState('all');
   const [selected, setSelected] = useState<CatalogModel | null>(null);
+  const [paramDirty, setParamDirty] = useState(false);
+
+  const openDetail = (model: CatalogModel) => {
+    if (selected?.id === model.id) return;
+    if (paramDirty && !window.confirm('切换模型会丢失未保存的参数修改。确定切换吗？')) return;
+    setParamDirty(false);
+    setSelected(model);
+  };
+
+  const closeDetail = () => {
+    if (paramDirty && !window.confirm('模型参数还有未保存的修改，关闭会丢失。确定关闭吗？')) return;
+    setParamDirty(false);
+    setSelected(null);
+  };
 
   const items = models.data?.items ?? [];
   const accounts = useMemo(() => {
@@ -256,7 +295,9 @@ export function ModelsPage() {
       />
 
       <InlineNote>
-        目录同步失败时服务端保留上一次完整快照；缓存超过 24 小时未成功刷新会暂停受影响模型的新请求。点击模型可编辑本网关的参数覆盖。
+        目录同步失败时服务端保留上一次完整快照；缓存超过设置中的目录有效期
+        {settings.data ? `（当前 ${formatMs(settings.data.catalogTtlMs)}）` : ''}
+        未成功刷新会暂停受影响模型的新请求。点击模型可编辑本网关的参数覆盖。
       </InlineNote>
 
       {models.error ? <ErrorState error={models.error} onRetry={models.reload} /> : null}
@@ -365,7 +406,7 @@ export function ModelsPage() {
                       <tr
                         key={model.id}
                         className="table-row--clickable"
-                        onClick={() => setSelected(model)}
+                        onClick={() => openDetail(model)}
                       >
                         <td>
                           <div className="cell-stack">
@@ -374,7 +415,7 @@ export function ModelsPage() {
                               className="link-button"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                setSelected(model);
+                                openDetail(model);
                               }}
                             >
                               {model.name}
@@ -418,6 +459,15 @@ export function ModelsPage() {
                           <div className="cell-stack">
                             <Badge tone={model.enabled ? 'ok' : 'neutral'}>{model.enabled ? '可调用' : '已停用'}</Badge>
                             {model.disabledReason ? <span className="small muted">{model.disabledReason}</span> : null}
+                            {!model.enabled ? (
+                              <Link
+                                className="small text-link"
+                                to={{ name: 'providers' }}
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                去供应商页同步 / 启用
+                              </Link>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -430,7 +480,16 @@ export function ModelsPage() {
         </>
       ) : null}
 
-      <ModelDetail model={selected} onClose={() => setSelected(null)} onSaved={model => { setSelected(current => current?.id === model.id ? model : current); models.reload(); }} />
+      <ModelDetail
+        model={selected}
+        onClose={closeDetail}
+        onDirtyChange={setParamDirty}
+        onSaved={model => {
+          setParamDirty(false);
+          setSelected(current => current?.id === model.id ? model : current);
+          models.reload();
+        }}
+      />
     </div>
   );
 }

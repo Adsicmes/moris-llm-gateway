@@ -1070,3 +1070,36 @@ test("realseek: explicit token:group is not overwritten and user tokens need exp
   assert.equal(model(withoutOptIn.models, 'a/m').enabled, false);
   assert.match(model(withoutOptIn.models, 'a/m').disabledReason ?? '', /没有可用推理令牌/);
 });
+
+test("all plugins: deterministic setup metadata and OpenAI authorization status without network", async () => {
+  for (const plugin of [realseek, deepseek, vm2api, openaiSubscription]) {
+    assert.ok(plugin.setup, `${plugin.id} should declare setup metadata`);
+    assert.ok(plugin.setup?.baseUrl?.hint);
+    assert.ok(plugin.setup?.billingType?.hint);
+    assert.ok(Array.isArray(plugin.setup?.secrets) && plugin.setup.secrets.length > 0);
+  }
+  assert.equal(deepseek.setup?.baseUrl?.default, 'https://api.deepseek.com');
+  assert.equal(openaiSubscription.setup?.billingType?.default, 'subscription');
+  assert.equal(realseek.setup?.baseUrl?.default, null);
+  assert.equal(vm2api.setup?.tokenTemplate?.supported, false);
+
+  const { context, calls } = makeContext(
+    account('openai-subscription', { baseUrl: 'https://chatgpt.com/backend-api/codex', billingType: 'subscription' }),
+    {
+      refreshToken: 'refresh-secret',
+      accessToken: 'access-secret',
+      accountId: 'account-1',
+      planType: 'pro',
+      expiresAt: NOW.toISOString(),
+    },
+    () => {
+      throw new Error('status must not call upstream');
+    },
+  );
+  const status = await openaiSubscription.authorization?.status?.(context);
+  assert.equal(status?.authorized, true);
+  assert.equal(status?.accountId, 'account-1');
+  assert.equal(status?.planType, 'pro');
+  assert.equal(calls.length, 0);
+  assert.ok(!JSON.stringify(status).includes('secret'));
+});

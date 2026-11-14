@@ -67,9 +67,11 @@ function RouteView({ route }: { route: Route }) {
     case 'providers':
       return <ProvidersPage />;
     case 'provider-new':
-      return <ProviderEditPage mode="new" />;
+      // key 让创建页和编辑页成为不同实例：创建成功跳转后必须重新读取服务端配置，
+      // 不能沿用新表单的 state，否则授权卡片和原始标识都不会出现。
+      return <ProviderEditPage key="provider-new" mode="new" />;
     case 'provider-edit':
-      return <ProviderEditPage mode="edit" id={route.id} />;
+      return <ProviderEditPage key={`provider-edit:${route.id}`} mode="edit" id={route.id} />;
     case 'models':
       return <ModelsPage />;
     case 'quota':

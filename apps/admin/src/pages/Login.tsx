@@ -127,6 +127,8 @@ export function LoginPage() {
                 onChange={(event) => setUsername(event.target.value)}
                 placeholder="admin"
                 required
+                aria-invalid={Boolean(error)}
+                aria-describedby={error ? 'login-error' : undefined}
               />
             </div>
             <div className="field">
@@ -139,10 +141,12 @@ export function LoginPage() {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 required
+                aria-invalid={Boolean(error)}
+                aria-describedby={error ? 'login-error' : undefined}
               />
             </div>
             {error ? (
-              <p className="form-error" role="alert">
+              <p className="form-error" id="login-error" role="alert">
                 {error}
               </p>
             ) : null}

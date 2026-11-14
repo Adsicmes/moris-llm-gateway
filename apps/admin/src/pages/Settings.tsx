@@ -4,6 +4,7 @@ import type { Settings } from '../types';
 import { describeError } from '../lib/api';
 import { formatMs } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import { useUnsavedChanges } from '../lib/unsaved';
 import {
   Button,
   Card,
@@ -119,6 +120,8 @@ export function SettingsPage() {
         JSON.stringify(fallbackBaseline.map((row) => [row.modelId.trim(), row.targets.trim()]))
     );
   }, [draft, baseline, fallbackRows, fallbackBaseline]);
+
+  useUnsavedChanges(dirty && !busy);
 
   const update = (key: keyof Draft, value: string) => {
     setDraft((current) => (current ? { ...current, [key]: value } : current));
@@ -284,7 +287,7 @@ export function SettingsPage() {
           <div className="form-layout__main">
             <Card title="刷新与缓存">
               <p className="card-lead">
-                目录与余额的刷新是服务端定时任务；余额超过过期阈值只标记过期，不停止调用。缓存超过 24 小时未成功刷新时，受影响模型暂停新请求。
+                目录与余额的刷新是服务端定时任务；余额超过过期阈值只标记过期，不停止调用。目录超过上方设置的有效期（当前 {formatMs(settings.catalogTtlMs)}，可修改）未成功刷新时，受影响模型暂停新请求。
               </p>
               <FormGrid>
                 {DURATION_FIELDS.slice(0, 4).map((field) => (

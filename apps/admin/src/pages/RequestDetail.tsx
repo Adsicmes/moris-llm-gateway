@@ -27,13 +27,20 @@ function CostCard({ label, value, note }: { label: string; value: string; note: 
   );
 }
 
-function aggregateMoney(attempts: Attempt[], kind: 'estimatedCost' | 'settledCost'): Money[] {
+function aggregateMoney(attempts: Attempt[], kind: 'estimatedCost' | 'settledCost'): Money[] | null {
   const sums = new Map<Money['currency'], number>();
+  let unknown = false;
   for (const attempt of attempts) {
-    const money = kind === 'estimatedCost' && attempt.settledCost ? null : attempt[kind];
-    if (money) sums.set(money.currency, (sums.get(money.currency) ?? 0) + money.amount);
+    if (kind === 'estimatedCost' && attempt.settledCost) continue;
+    const money = attempt[kind];
+    if (!money) {
+      // 估算口径下任一未结算 attempt 缺少费用就是未知；不能汇总成“无费用记录”。
+      if (kind === 'estimatedCost') unknown = true;
+      continue;
+    }
+    sums.set(money.currency, (sums.get(money.currency) ?? 0) + money.amount);
   }
-  return [...sums].map(([currency, amount]) => ({ currency, amount }));
+  return unknown ? null : [...sums].map(([currency, amount]) => ({ currency, amount }));
 }
 
 function aggregateEquivalent(attempts: Attempt[]): number | null {
@@ -42,7 +49,8 @@ function aggregateEquivalent(attempts: Attempt[]): number | null {
   return attempts.reduce((sum, attempt) => sum + (attempt.equivalentUsd ?? 0), 0);
 }
 
-function moneyListText(list: Money[]): string {
+function moneyListText(list: Money[] | null): string {
+  if (list === null) return '未知';
   if (list.length === 0) return '无费用记录';
   return list.map((money) => formatMoney(money)).join(' + ');
 }
@@ -259,7 +267,7 @@ export function RequestDetailPage({ id }: { id: string }) {
             <CostCard
               label="估算（由 attempt 汇总）"
               value={moneyListText(estimated)}
-              note="只汇总未结算尝试；已结算尝试不重复估算"
+              note="只汇总未结算尝试；任一尝试缺少费用时显示未知，不会显示成无费用记录"
             />
             <CostCard
               label="上游已结算"
