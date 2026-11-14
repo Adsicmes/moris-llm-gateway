@@ -108,11 +108,11 @@ function ParameterForm({
         const id = `parameter-${key}`;
         const hint = `自动值：${automaticValue(state.automatic, key)}${state.overrides[key] !== undefined ? ' · 已保存手工覆盖' : ''}`;
         return <Field key={key} id={id} label={label} hint={hint} error={errors[key]}>
-          {type === 'boolean' ? <Select id={id} value={draft[key]} disabled={busy} aria-describedby={`${id}-hint`}
+          {type === 'boolean' ? <Select id={id} value={draft[key]} disabled={busy}
             onChange={event => { setDraft({ ...draft, [key]: event.target.value }); setNotice(''); }}>
             <option value="">自动</option><option value="true">支持</option><option value="false">不支持</option>
           </Select> : <Input id={id} type={type} min={type === 'number' ? 1 : undefined} step={type === 'number' ? 1 : undefined}
-            value={draft[key]} disabled={busy} placeholder="自动" aria-invalid={!!errors[key]} aria-describedby={`${id}-${errors[key] ? 'error' : 'hint'}`}
+            value={draft[key]} disabled={busy} placeholder="自动" aria-invalid={!!errors[key]}
             onChange={event => { setDraft({ ...draft, [key]: event.target.value }); setNotice(''); }} />}
         </Field>;
       })}

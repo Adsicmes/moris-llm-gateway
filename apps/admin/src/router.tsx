@@ -66,10 +66,14 @@ export function routeHref(route: Route): string {
   }
 }
 
-export function navigate(route: Route | string): void {
+let bypassNextNavigation = false;
+
+export function navigate(route: Route | string, options: { force?: boolean } = {}): void {
   const next = typeof route === 'string' ? route : routeHref(route);
   if (window.location.hash === next) return;
-  if (!confirmNavigation()) return;
+  // 会话失效/退出必须能离开表单，否则用户会停在已失效的页面。
+  if (options.force) bypassNextNavigation = true;
+  else if (!confirmNavigation()) return;
   window.location.hash = next;
 }
 
@@ -80,7 +84,9 @@ export function useRoute(): Route {
     const onChange = () => {
       const next = window.location.hash;
       if (next === lastHash.current) return;
-      if (!confirmNavigation()) {
+      const forced = bypassNextNavigation;
+      bypassNextNavigation = false;
+      if (!forced && !confirmNavigation()) {
         // 在更新路由状态前恢复地址；页面不卸载，未保存的草稿不会丢失。
         window.location.hash = lastHash.current;
         return;

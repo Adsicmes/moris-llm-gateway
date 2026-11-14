@@ -50,7 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const handleUnauthorized = useCallback(() => {
     setSession(null);
-    if (window.location.hash !== '#/login') navigate('#/login');
+    if (window.location.hash !== '#/login') navigate('#/login', { force: true });
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
@@ -72,7 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // 会话已经失效时也要清掉本地状态，避免停在半登录界面。
     } finally {
       setSession(null);
-      navigate('#/login');
+      navigate('#/login', { force: true });
     }
   }, [session?.csrfToken]);
 
