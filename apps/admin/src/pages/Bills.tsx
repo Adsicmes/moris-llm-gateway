@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type FormEvent } from 'react';
 import { useApi } from '../auth';
-import type { Bill, BillInput, BillsResponse, ProvidersResponse } from '../types';
+import type { Bill, BillInput, BillsResponse, ProviderHistoryResponse, ProvidersResponse } from '../types';
 import { describeError } from '../lib/api';
 import { dateInputToIso, formatCny, formatDate, formatDateTime } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -24,6 +24,12 @@ import {
   useToast,
 } from '../ui';
 
+interface AccountOption {
+  id: string;
+  name: string;
+  deleted: boolean;
+}
+
 function BillForm({
   bill,
   accounts,
@@ -31,7 +37,7 @@ function BillForm({
   onClose,
 }: {
   bill: Bill | null;
-  accounts: Array<{ id: string; name: string }>;
+  accounts: AccountOption[];
   onSave: (input: BillInput, id?: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -119,7 +125,12 @@ function BillForm({
             还没有供应商账户。账单需要关联供应商；请先在供应商页接入账号。
           </InlineNote>
         ) : null}
-        <Field label="供应商" id="bill-account" error={errors.accountId}>
+        <Field
+          label="供应商"
+          id="bill-account"
+          error={errors.accountId}
+          hint="已删除供应商按归档身份显示，可继续补录付款或退款；不会重新激活供应商。"
+        >
           <Select
             id="bill-account"
             value={accountId}
@@ -130,7 +141,8 @@ function BillForm({
             <option value="">选择供应商</option>
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
-                {account.name} · {account.id}
+                {account.name}
+                {account.deleted ? '（已删除）' : ''} · {account.id}
               </option>
             ))}
             {accountId && !accounts.some((account) => account.id === accountId) ? (
@@ -210,14 +222,30 @@ export function BillsPage() {
   const toast = useToast();
   const bills = useAsync((signal) => api<BillsResponse>('/api/admin/bills', { signal }), []);
   const providers = useAsync((signal) => api<ProvidersResponse>('/api/admin/providers', { signal }), []);
+  const history = useAsync((signal) => api<ProviderHistoryResponse>('/api/admin/provider-history', { signal }), []);
   const [editing, setEditing] = useState<Bill | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Bill | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [periodFilter, setPeriodFilter] = useState('all');
 
-  const accounts = providers.data?.items ?? [];
-  const accountName = (id: string) => accounts.find((account) => account.id === id)?.name ?? id;
+  // 历史身份按原 accountId 独立解析；同名新账号不会替代旧账单的供应商。
+  const accountOptions = useMemo(() => {
+    const map = new Map<string, AccountOption>();
+    for (const item of history.data?.items ?? []) {
+      map.set(item.id, { id: item.id, name: item.name, deleted: true });
+    }
+    for (const account of providers.data?.items ?? []) {
+      map.set(account.id, { id: account.id, name: account.name, deleted: false });
+    }
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  }, [providers.data, history.data]);
+
+  const accountById = useMemo(
+    () => new Map(accountOptions.map((account) => [account.id, account])),
+    [accountOptions],
+  );
+  const accountName = (id: string) => accountById.get(id)?.name ?? id;
 
   const periods = useMemo(
     () => Array.from(new Set((bills.data?.items ?? []).map((bill) => bill.period).filter((value): value is string => Boolean(value)))).sort(),
@@ -267,7 +295,7 @@ export function BillsPage() {
     <div className="page">
       <PageHeader
         title="人民币账单"
-        description="手动记录充值、续费与退款。实付与请求费用、API 等价消费分开统计，不做成本分摊。"
+        description="手动记录充值、续费与退款。已删除供应商按归档身份继续记账，可补录付款或退款，但不会重新激活供应商。实付与请求费用、API 等价消费分开统计，不做成本分摊。"
         actions={
           <>
             <Button icon="refresh" onClick={bills.reload} loading={bills.refreshing}>
@@ -279,6 +307,12 @@ export function BillsPage() {
           </>
         }
       />
+
+      {history.error ? (
+        <p className="small muted">
+          历史供应商身份读取失败：{describeError(history.error)}。已删除供应商的账单暂时只能显示 accountId，不会用同名新账号替代。
+        </p>
+      ) : null}
 
       <section className="bill-summary">
         <div className="bill-summary__main">
@@ -359,13 +393,20 @@ export function BillsPage() {
                 <tbody>
                   {filtered.map((bill) => {
                     const refund = bill.amountCny < 0;
+                    const account = accountById.get(bill.accountId);
                     return (
                       <tr key={bill.id}>
                         <td className="nowrap">{formatDate(bill.paidAt)}</td>
                         <td>
                           <div className="cell-stack">
-                            <span>{accountName(bill.accountId)}</span>
+                            <span className="inline-feedback">
+                              <span>{account?.name ?? bill.accountId}</span>
+                              {account?.deleted ? <Badge>已删除</Badge> : null}
+                            </span>
                             <span className="mono small muted">{bill.accountId}</span>
+                            {account?.deleted ? (
+                              <span className="small muted">按归档身份记账，不会重新激活供应商。</span>
+                            ) : null}
                           </div>
                         </td>
                         <td className={refund ? 'num amount-negative' : 'num'}>
@@ -410,7 +451,7 @@ export function BillsPage() {
         <BillForm
           key="new"
           bill={null}
-          accounts={accounts.map((account) => ({ id: account.id, name: account.name }))}
+          accounts={accountOptions}
           onSave={save}
           onClose={() => setCreating(false)}
         />
@@ -420,7 +461,7 @@ export function BillsPage() {
         <BillForm
           key={editing.id}
           bill={editing}
-          accounts={accounts.map((account) => ({ id: account.id, name: account.name }))}
+          accounts={accountOptions}
           onSave={save}
           onClose={() => setEditing(null)}
         />

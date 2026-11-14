@@ -4,6 +4,8 @@ import type {
   PluginsResponse,
   ProviderAccount,
   ProviderAuthorizationStatus,
+  ProviderDeletionsResponse,
+  ProviderHistoryResponse,
   ProviderInput,
   ProvidersResponse,
   SyncResult,
@@ -15,6 +17,7 @@ import { useAsync } from '../lib/useAsync';
 import { useUnsavedChanges } from '../lib/unsaved';
 import { Link, navigate } from '../router';
 import { OpenAIProviderAuth } from './OpenAIProviderAuth';
+import { DeletionStatusBadge, deletionStatusLabel } from './ProviderDeletion';
 import {
   Badge,
   Button,
@@ -75,6 +78,12 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
   );
   const plugins = useAsync((signal) => api<PluginsResponse>('/api/admin/plugins', { signal }), []);
   const proxies = useAsync(signal => api<{ items: ProxyView[] }>('/api/admin/proxies', { signal }), []);
+  const history = useAsync(
+    (signal) => mode === 'new'
+      ? api<ProviderHistoryResponse>('/api/admin/provider-history', { signal })
+      : Promise.resolve<ProviderHistoryResponse>({ items: [] }),
+    [mode],
+  );
 
   const [namespace, setNamespace] = useState('');
   const [name, setName] = useState('');
@@ -82,6 +91,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
   const [baseUrl, setBaseUrl] = useState('');
   const [billingType, setBillingType] = useState<BillingType>('metered');
   const [enabled, setEnabled] = useState(true);
+  const [acknowledgeReuse, setAcknowledgeReuse] = useState(false);
   const [proxyUrl, setProxyUrl] = useState('');
   const [proxySelection, setProxySelection] = useState('');
   const [autoCreateTokens, setAutoCreateTokens] = useState(false);
@@ -109,6 +119,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
           baseUrl: '',
           billingType: 'metered',
           enabled: true,
+          acknowledgeReuse: false,
           proxyUrl: '',
           proxySelection: '',
           autoCreateTokens: false,
@@ -119,6 +130,28 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
       : null,
   );
 
+  const deletionTasks = useAsync(
+    (signal) => original?.deletionTaskId
+      ? api<ProviderDeletionsResponse>('/api/admin/provider-deletions', { signal })
+      : Promise.resolve<ProviderDeletionsResponse>({ items: [] }),
+    [original?.deletionTaskId],
+  );
+  const deletionLocked = Boolean(original?.deletionTaskId);
+  const deletionTask = original?.deletionTaskId
+    ? deletionTasks.data?.items.find((task) => task.id === original.deletionTaskId) ?? null
+    : null;
+  const deletionRepair = deletionTask?.status === 'failed' || deletionTask?.status === 'paused';
+  const deletionTaskMissing =
+    deletionLocked && !deletionTasks.loading && !deletionTasks.error && !deletionTask;
+  const secretsEditable = !deletionLocked || deletionRepair;
+  const identityLocked = mode === 'edit' && deletionLocked;
+
+  const namespaceHistory = useMemo(
+    () => (mode === 'new' ? (history.data?.items ?? []).filter((item) => item.namespace === namespace.trim()) : []),
+    [history.data, namespace, mode],
+  );
+  const namespaceReused = namespaceHistory.length > 0;
+
   const snapshot = useMemo(
     () =>
       JSON.stringify({
@@ -128,6 +161,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         baseUrl,
         billingType,
         enabled,
+        acknowledgeReuse,
         proxyUrl,
         proxySelection,
         autoCreateTokens,
@@ -135,7 +169,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         optionsText,
         secrets: secretRows,
       }),
-    [namespace, name, plugin, baseUrl, billingType, enabled, proxyUrl, proxySelection, autoCreateTokens, token, optionsText, secretRows],
+    [namespace, name, plugin, baseUrl, billingType, enabled, acknowledgeReuse, proxyUrl, proxySelection, autoCreateTokens, token, optionsText, secretRows],
   );
   const dirty = baseline !== null && snapshot !== baseline;
   const { allowNavigation } = useUnsavedChanges(dirty && !busy);
@@ -179,6 +213,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         baseUrl: found.baseUrl,
         billingType: found.billingType,
         enabled: found.enabled,
+        acknowledgeReuse: false,
         proxyUrl: found.proxyUrl ?? '',
         proxySelection: found.proxyId ?? (found.proxyId === undefined && found.proxyUrl ? '__legacy' : ''),
         autoCreateTokens: found.autoCreateTokens,
@@ -262,8 +297,48 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     setSecretRows((current) => (current.length === 1 ? [{ id: nextSecretId.current++, key: '', value: '', remove: false }] : current.filter((row) => row.id !== rowId)));
   };
 
+  const collectSecrets = (nextErrors: Record<string, string>): Record<string, string> => {
+    const secrets: Record<string, string> = {};
+    for (const row of secretRows) {
+      const key = row.key.trim();
+      if (!key) {
+        if (row.value && !row.remove) nextErrors[`secret.${row.id}`] = '填写该密钥的键名。';
+        continue;
+      }
+      if (row.remove) {
+        secrets[key] = '';
+      } else if (row.value !== '') {
+        secrets[key] = row.value;
+      }
+    }
+    return secrets;
+  };
+
   const validate = (): { input?: ProviderInput } => {
     const nextErrors: Record<string, string> = {};
+
+    // 删除任务中只允许修复密钥与代理；锁定字段不参与校验，避免历史 JSON 挡住修复。
+    if (deletionLocked) {
+      const secrets = collectSecrets(nextErrors);
+      setErrors(nextErrors);
+      if (Object.keys(nextErrors).length > 0) {
+        focusFirstInvalid();
+        return {};
+      }
+      const repairInput: ProviderInput = {
+        namespace: namespace.trim(),
+        name: name.trim(),
+        plugin: plugin.trim(),
+        baseUrl: baseUrl.trim(),
+        billingType,
+        enabled,
+        autoCreateTokens,
+      };
+      if (Object.keys(secrets).length > 0) repairInput.secrets = secrets;
+      if (proxySelection !== '__legacy') repairInput.proxyId = proxySelection || null;
+      return { input: repairInput };
+    }
+
     if (!namespace.trim()) {
       nextErrors.namespace = '填写命名空间，它决定业务模型 ID 的第一段。';
     } else if (!/^[a-z][a-z0-9-]{0,63}$/.test(namespace.trim())) {
@@ -272,6 +347,9 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     if (!name.trim()) nextErrors.name = '填写一个可辨认的供应商名称。';
     else if (name.trim().length > 100) nextErrors.name = '供应商名称最多 100 个字符。';
     if (!plugin.trim()) nextErrors.plugin = '选择或填写插件 ID。';
+    if (mode === 'new' && namespaceReused && !acknowledgeReuse) {
+      nextErrors.acknowledgeNamespaceReuse = '该命名空间曾被使用；请确认旧客户端同路径可能指向新账号的风险。';
+    }
     if (!baseUrl.trim()) {
       nextErrors.baseUrl = '填写上游 base URL。';
     } else {
@@ -330,19 +408,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
       };
     }
 
-    const secrets: Record<string, string> = {};
-    for (const row of secretRows) {
-      const key = row.key.trim();
-      if (!key) {
-        if (row.value && !row.remove) nextErrors[`secret.${row.id}`] = '填写该密钥的键名。';
-        continue;
-      }
-      if (row.remove) {
-        secrets[key] = '';
-      } else if (row.value !== '') {
-        secrets[key] = row.value;
-      }
-    }
+    const secrets = collectSecrets(nextErrors);
 
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
@@ -366,12 +432,22 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     // 旧配置不提交任何代理字段，确保原有认证原样保留。
     if (proxySelection !== '__legacy') input.proxyId = proxySelection || null;
 
+    if (mode === 'new' && namespaceReused) input.acknowledgeNamespaceReuse = acknowledgeReuse;
+
     return { input };
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setFormError(null);
+    if (deletionLocked && !deletionRepair) {
+      setFormError(
+        deletionTask
+          ? `删除任务正在${deletionStatusLabel(deletionTask.status)}，暂不能修改配置。任务失败或暂停后才可修复凭据或代理。`
+          : '删除任务状态尚未读取；暂不能修改配置，请稍后重试。',
+      );
+      return;
+    }
     const result = validate();
     if (!result.input) {
       setFormError('请修正标记的字段后再保存。');
@@ -389,14 +465,21 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         navigate({ name: 'provider-edit', id: created.item.id });
         return;
       } else {
-        const patchInput: Partial<ProviderInput> = { ...result.input };
+        // 删除流程中只提交密钥与代理修复；base URL、options、启用等锁定字段绝不覆盖。
+        const patchInput: Partial<ProviderInput> = deletionLocked
+          ? {
+              ...(result.input.secrets ? { secrets: result.input.secrets } : {}),
+              ...(result.input.proxyId !== undefined ? { proxyId: result.input.proxyId } : {}),
+            }
+          : { ...result.input };
         delete patchInput.namespace;
         delete patchInput.plugin;
+        delete patchInput.acknowledgeNamespaceReuse;
         await api<{ item: ProviderAccount }>(`/api/admin/providers/${encodeURIComponent(id ?? '')}`, {
           method: 'PATCH',
           body: patchInput,
         });
-        toast.push('供应商配置已保存。');
+        toast.push(deletionLocked ? '凭据或代理已保存；请回到供应商列表重试删除任务。' : '供应商配置已保存。');
       }
       allowNavigation();
       navigate('#/providers');
@@ -448,6 +531,28 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         }
       />
 
+      {deletionLocked ? (
+        <InlineNote tone={deletionRepair ? 'warn' : 'bad'}>
+          <strong>这个供应商处于彻底删除流程。</strong>{' '}
+          {deletionTask ? (
+            <>
+              当前状态：{deletionStatusLabel(deletionTask.status)}。
+            </>
+          ) : deletionTasks.error ? (
+            <>删除任务状态读取失败：{describeError(deletionTasks.error)}。</>
+          ) : deletionTaskMissing ? (
+            <>服务端没有返回这个删除任务，配置保持锁定；请回到列表刷新后核对。</>
+          ) : (
+            <>正在读取删除任务状态。</>
+          )}{' '}
+          {deletionRepair
+            ? '只允许修复上游密钥与代理；base URL、插件、options、启用状态和令牌模板已锁定。修复后回到供应商列表重试删除任务。'
+            : deletionTask?.status === 'cancelled'
+              ? '删除流程已取消，供应商保持停用，配置锁定；已删除的上游资源不会恢复。'
+              : '当前不能修改配置。等待排空或清理完成，或任务失败、暂停后再修复凭据与代理。'}
+        </InlineNote>
+      ) : null}
+
       <form onSubmit={submit} noValidate>
         <div className="form-layout">
           <div className="form-layout__main">
@@ -465,6 +570,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     onChange={(event) => setName(event.target.value)}
                     placeholder="例如 DeepSeek 官方"
                     maxLength={100}
+                    disabled={identityLocked}
                     aria-invalid={Boolean(errors.name)}
                     aria-describedby={errors.name ? 'provider-name-error' : undefined}
                   />
@@ -544,6 +650,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                       billingTouched.current = true;
                       setBillingType(event.target.value as BillingType);
                     }}
+                    disabled={identityLocked}
                   >
                     <option value="metered">按量计费</option>
                     <option value="subscription">订阅</option>
@@ -561,7 +668,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                       {setup?.baseUrl?.default && baseUrl !== setup.baseUrl.default ? (
                         <>
                           {' '}
-                          <button type="button" className="link-button" onClick={applyRecommendedBaseUrl}>
+                          <button type="button" className="link-button" onClick={applyRecommendedBaseUrl} disabled={identityLocked}>
                             使用推荐值 {setup.baseUrl.default}
                           </button>
                         </>
@@ -579,6 +686,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     }}
                     placeholder={setup?.baseUrl?.default ?? 'https://api.example.com'}
                     className="mono"
+                    disabled={identityLocked}
                     aria-invalid={Boolean(errors.baseUrl)}
                     aria-describedby={errors.baseUrl ? 'provider-base-url-error' : undefined}
                   />
@@ -601,6 +709,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     id="provider-proxy"
                     value={proxySelection}
                     onChange={(event) => setProxySelection(event.target.value)}
+                    disabled={identityLocked && !deletionRepair}
                     aria-invalid={Boolean(errors.proxyUrl)}
                     aria-describedby={errors.proxyUrl ? 'provider-proxy-error' : undefined}
                   >
@@ -622,10 +731,64 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
 
               <Checkbox
                 label="启用这个供应商"
-                description="停用后不再调度新请求；历史请求与账目保留。"
+                description={
+                  deletionLocked
+                    ? '删除流程中已锁定。任务完成或取消后供应商保持停用，不会自动重新启用。'
+                    : '停用后不再调度新请求；历史请求与账目保留。'
+                }
                 checked={enabled}
+                disabled={deletionLocked}
                 onChange={(event) => setEnabled(event.target.checked)}
               />
+
+              {mode === 'new' && namespaceReused ? (
+                <div className="notice notice--warn form-note" role="status">
+                  <Icon name="alert" size={18} />
+                  <div>
+                    <strong>这个命名空间曾被使用</strong>
+                    <p>
+                      历史供应商：
+                      {namespaceHistory
+                        .map((item) => `${item.name}（删除于 ${formatDateTime(item.deletedAt)}）`)
+                        .join('；')}
+                      。模型 ID 第一段相同，旧客户端可能把同名模型路径指向新账号；旧历史与账单不会归入新账号。
+                    </p>
+                    <Checkbox
+                      label="我了解旧客户端可能把同名模型路径指向新账号"
+                      description="仅在确认接受这个路径风险后继续创建；服务端也会校验该确认。"
+                      checked={acknowledgeReuse}
+                      onChange={(event) => {
+                        setAcknowledgeReuse(event.target.checked);
+                        setErrors((current) => {
+                          if (!current.acknowledgeNamespaceReuse) return current;
+                          const next = { ...current };
+                          delete next.acknowledgeNamespaceReuse;
+                          return next;
+                        });
+                      }}
+                      aria-invalid={Boolean(errors.acknowledgeNamespaceReuse)}
+                      aria-describedby={errors.acknowledgeNamespaceReuse ? 'namespace-reuse-error' : undefined}
+                    />
+                    {errors.acknowledgeNamespaceReuse ? (
+                      <p className="field__error" id="namespace-reuse-error" role="alert">
+                        {errors.acknowledgeNamespaceReuse}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+              {mode === 'new' && history.error ? (
+                <div className="notice notice--warn form-note" role="status">
+                  <Icon name="alert" size={18} />
+                  <div>
+                    <strong>历史供应商身份读取失败</strong>
+                    <p>命名空间复用风险未能在本地预检；服务端仍会在创建时校验并拒绝未经确认的同名复用。</p>
+                  </div>
+                  <Button size="sm" variant="secondary" icon="refresh" onClick={history.reload}>
+                    重试读取
+                  </Button>
+                </div>
+              ) : null}
             </Card>
 
             {setup ? (
@@ -657,7 +820,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
               </Card>
             ) : null}
 
-            {mode === 'edit' && original?.plugin === 'openai-subscription' ? (
+            {mode === 'edit' && original?.plugin === 'openai-subscription' && !deletionLocked ? (
               <OpenAIProviderAuth
                 key={original.id}
                 providerId={original.id}
@@ -668,6 +831,12 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
               />
             ) : null}
 
+            {mode === 'edit' && deletionLocked ? (
+              <Card title="设备授权">
+                <InlineNote>删除流程中不会发起新的授权；请在任务失败或暂停后先修复凭据或代理，再回到列表重试。</InlineNote>
+              </Card>
+            ) : null}
+
             <Card title="上游密钥">
               <InlineNote>
                 已保存的密钥不会从接口返回。这里只提交新增或替换的键；把「删除」勾上并保存，会向服务端发送空字符串以删除该键。
@@ -675,6 +844,11 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   ? ' 设备授权完成后 accessToken/refreshToken 由服务端写入；手工填写只用于导入已有令牌。'
                   : ''}
               </InlineNote>
+              {deletionLocked && !deletionRepair ? (
+                <InlineNote tone="warn">
+                  删除任务进行中，密钥暂不可编辑。任务失败或暂停后可在这里修复；修复不会恢复已删除的上游资源。
+                </InlineNote>
+              ) : null}
               {setup?.secrets?.length ? (
                 <div className="secret-guide">
                   <h3>这个插件需要的键</h3>
@@ -702,7 +876,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                         onChange={(event) => updateSecret(row.id, { key: event.target.value })}
                         placeholder={field?.key ?? setup?.secrets?.[0]?.key ?? 'apiKey'}
                         className="mono"
-                        disabled={row.remove}
+                        disabled={row.remove || !secretsEditable}
                         autoComplete="off"
                         aria-invalid={Boolean(errors[`secret.${row.id}`])}
                         aria-describedby={errors[`secret.${row.id}`] ? `secret-key-${row.id}-error` : undefined}
@@ -717,7 +891,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                         placeholder={row.remove ? '将删除该键' : field?.placeholder ?? '留空表示保持不变'}
                         type="password"
                         className="mono"
-                        disabled={row.remove}
+                        disabled={row.remove || !secretsEditable}
                         autoComplete="new-password"
                       />
                     </div>
@@ -725,9 +899,16 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                       <Checkbox
                         label="删除"
                         checked={row.remove}
+                        disabled={!secretsEditable}
                         onChange={(event) => updateSecret(row.id, { remove: event.target.checked })}
                       />
-                      <Button variant="ghost" size="sm" onClick={() => removeSecretRow(row.id)} aria-label="移除这一行">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => removeSecretRow(row.id)}
+                        disabled={!secretsEditable}
+                        aria-label="移除这一行"
+                      >
                         移除
                       </Button>
                     </div>
@@ -740,7 +921,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   );
                 })}
               </div>
-              <Button variant="secondary" size="sm" icon="plus" onClick={addSecret}>
+              <Button variant="secondary" size="sm" icon="plus" onClick={addSecret} disabled={!secretsEditable}>
                 添加密钥
               </Button>
             </Card>
@@ -754,6 +935,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                 label="允许自动创建上游令牌"
                 description="默认关闭。开启后只按以下模板创建，并优先复用本网关管理的既有令牌；不会修改或删除其他令牌。"
                 checked={autoCreateTokens}
+                disabled={deletionLocked}
                 onChange={(event) => {
                   const next = event.target.checked;
                   setAutoCreateTokens(next);
@@ -769,6 +951,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     placeholder="moris"
                     className="mono"
                     maxLength={64}
+                    disabled={deletionLocked}
                     aria-invalid={Boolean(errors['token.name'])}
                   />
                 </Field>
@@ -781,7 +964,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     value={token.quota}
                     onChange={(event) => setToken((current) => ({ ...current, quota: event.target.value }))}
                     placeholder="0"
-                    disabled={token.unlimited}
+                    disabled={token.unlimited || deletionLocked}
                     aria-invalid={Boolean(errors['token.quota'])}
                   />
                 </Field>
@@ -795,6 +978,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     value={token.expires}
                     onChange={(event) => setToken((current) => ({ ...current, expires: event.target.value }))}
                     placeholder="30"
+                    disabled={deletionLocked}
                     aria-invalid={Boolean(errors['token.expires'])}
                   />
                 </Field>
@@ -803,6 +987,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     label="不限额"
                     description="勾选后额度按 0 提交；是否支持以插件实测为准。"
                     checked={token.unlimited}
+                    disabled={deletionLocked}
                     onChange={(event) => setToken((current) => ({ ...current, unlimited: event.target.checked }))}
                   />
                 </div>
@@ -835,6 +1020,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   rows={7}
                   className="mono"
                   spellCheck={false}
+                  disabled={deletionLocked}
                   aria-invalid={Boolean(errors.options)}
                   aria-describedby={errors.options ? 'provider-options-error' : undefined}
                 />
@@ -856,6 +1042,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   <Button
                     variant="secondary"
                     size="sm"
+                    disabled={deletionLocked}
                     onClick={() => {
                       if (
                         optionsText.trim() &&
@@ -878,6 +1065,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                 <Button
                   variant="secondary"
                   size="sm"
+                  disabled={deletionLocked}
                   onClick={() => {
                     const parsed = parseOptions(optionsText);
                     if (parsed.error) {
@@ -899,6 +1087,37 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
           </div>
 
           <aside className="form-layout__side">
+            {deletionLocked ? (
+              <Card title="彻底删除流程">
+                <p className="small muted">该供应商已进入彻底删除，不能启用、同步或发起授权。</p>
+                <dl className="meta-list">
+                  <div>
+                    <dt>状态</dt>
+                    <dd>
+                      <DeletionStatusBadge status={deletionTask?.status} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>更新</dt>
+                    <dd>{formatDateTime(deletionTask?.updatedAt)}</dd>
+                  </div>
+                </dl>
+                {deletionTask?.message ? <p className="small">{deletionTask.message}</p> : null}
+                {deletionTasks.error ? <ErrorState error={deletionTasks.error} onRetry={deletionTasks.reload} /> : null}
+                <p className="small muted">
+                  {deletionRepair
+                    ? '任务已停止：修复上游密钥或代理后，回到供应商列表重试删除任务。'
+                    : deletionTask?.status === 'cancelled'
+                      ? '删除已取消：供应商保持停用，配置保持锁定；已删除的上游资源不会恢复。'
+                      : deletionTaskMissing
+                        ? '服务端没有返回这个删除任务，配置保持锁定；请回到列表刷新后核对。'
+                        : '任务仍在进行或状态未知：失败或暂停后才可修复凭据与代理。'}
+                </p>
+                <Link className="btn btn--secondary btn--sm" to={{ name: 'providers' }}>
+                  返回列表查看进度
+                </Link>
+              </Card>
+            ) : (
             <Card title={mode === 'new' ? '创建后的接入步骤' : '接入步骤'}>
               <ol className="check-list step-list">
                 <li>{mode === 'edit' ? '供应商配置已保存。' : '先保存供应商；保存后会留在编辑页继续下一步。'}</li>
@@ -940,7 +1159,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                     size="sm"
                     icon="sync"
                     loading={syncing}
-                    disabled={!original?.enabled}
+                    disabled={!original?.enabled || deletionLocked}
                     onClick={() => void syncProvider()}
                   >
                     同步目录与余额
@@ -948,13 +1167,18 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                 </div>
               ) : null}
             </Card>
+            )}
             <Card title="保存前核对">
               <ul className="check-list">
                 <li>命名空间与插件创建后不可修改。</li>
                 <li>密钥只提交新增或替换项，列表接口不会回传秘密。</li>
                 <li>自动创建令牌默认关闭，模板不完整时不会创建。</li>
                 <li>授权前先保存配置，授权与同步都会走当前代理。</li>
-                <li>停用是软停用，历史账目保留。</li>
+                {deletionLocked ? (
+                  <li>删除流程中只提交密钥与代理修复；启用、同步和授权保持锁定。</li>
+                ) : (
+                  <li>停用是软停用，历史账目保留；彻底删除是另一个独立流程。</li>
+                )}
               </ul>
             </Card>
             {mode === 'edit' && original ? (
@@ -992,8 +1216,13 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
           <Link className="btn btn--secondary btn--md" to={{ name: 'providers' }}>
             取消
           </Link>
-          <Button type="submit" variant="primary" loading={busy}>
-            {mode === 'new' ? '创建供应商' : '保存修改'}
+          <Button
+            type="submit"
+            variant="primary"
+            loading={busy}
+            disabled={deletionLocked && !deletionRepair}
+          >
+            {mode === 'new' ? '创建供应商' : deletionLocked ? '保存凭据 / 代理修复' : '保存修改'}
           </Button>
         </FormActions>
       </form>

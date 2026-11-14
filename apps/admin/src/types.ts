@@ -2,9 +2,13 @@ import type {
   BillingType,
   CatalogModel,
   DataState,
+  DeletionAction,
+  DeletionPreview,
   Money,
   Price,
   ProviderAccount,
+  ProviderDeletion,
+  ProviderHistory,
   QuotaSummary,
   Settings,
   TokenTemplate,
@@ -81,6 +85,18 @@ export interface PluginsResponse {
   items: PluginInfo[];
 }
 
+export interface ProviderDeletionsResponse {
+  items: ProviderDeletion[];
+}
+
+export interface ProviderHistoryResponse {
+  items: ProviderHistory[];
+}
+
+export interface ProviderDeletionResponse {
+  item: ProviderDeletion;
+}
+
 export interface ProviderInput {
   namespace: string;
   name: string;
@@ -94,6 +110,8 @@ export interface ProviderInput {
   tokenTemplate?: TokenTemplate;
   options?: Record<string, unknown>;
   secrets?: Record<string, string>;
+  /** 仅新建时使用：命名空间已在历史供应商中出现，管理员确认旧客户端路径风险。 */
+  acknowledgeNamespaceReuse?: boolean;
 }
 
 export interface SyncResult {
@@ -240,4 +258,17 @@ export interface DeviceCreateResponse {
   key: string;
 }
 
-export type { Settings, TokenTemplate, Money, DataState, CatalogModel, ProviderAccount, QuotaSummary, BillingType };
+export type {
+  Settings,
+  TokenTemplate,
+  Money,
+  DataState,
+  CatalogModel,
+  ProviderAccount,
+  ProviderDeletion,
+  ProviderHistory,
+  DeletionAction,
+  DeletionPreview,
+  QuotaSummary,
+  BillingType,
+};

@@ -1,7 +1,8 @@
 import { useApi } from '../auth';
-import type { Attempt, RequestDetailResponse } from '../types';
+import type { Attempt, ProviderHistoryResponse, ProvidersResponse, RequestDetailResponse } from '../types';
 import type { Money } from '../lib/contracts';
 import { formatDateTime, formatDuration, formatMoney, formatUsd, prettyJson } from '../lib/format';
+import { describeError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import { Link } from '../router';
 import {
@@ -77,7 +78,15 @@ function PriceBasis({ attempt }: { attempt: Attempt }) {
   );
 }
 
-function AttemptCard({ attempt, index }: { attempt: Attempt; index: number }) {
+function AttemptCard({
+  attempt,
+  index,
+  account,
+}: {
+  attempt: Attempt;
+  index: number;
+  account?: { name: string; deleted: boolean };
+}) {
   const usage = attempt.usage;
   const attemptNumber = attempt.number ?? index + 1;
   return (
@@ -87,7 +96,21 @@ function AttemptCard({ attempt, index }: { attempt: Attempt; index: number }) {
           <p className="eyebrow">Attempt {attemptNumber}</p>
           <h3>{attempt.modelId ?? '未命名尝试'}</h3>
           <p className="small muted">
-            {attempt.accountId ?? '账户未提供'}
+            {attempt.accountId ? (
+              <>
+                {account?.name ?? attempt.accountId}
+                {account?.deleted ? (
+                  <>
+                    {' '}
+                    <Badge>已删除供应商</Badge>
+                  </>
+                ) : null}
+                {' · '}
+                <span className="mono">{attempt.accountId}</span>
+              </>
+            ) : (
+              '账户未提供'
+            )}
             {attempt.pool ? ` · ${attempt.pool}` : ''}
             {attempt.billingType ? ` · ${attempt.billingType === 'subscription' ? '订阅' : '按量'}` : ''}
           </p>
@@ -197,6 +220,16 @@ export function RequestDetailPage({ id }: { id: string }) {
     (signal) => api<RequestDetailResponse>(`/api/admin/requests/${encodeURIComponent(id)}`, { signal }),
     [id],
   );
+  const providers = useAsync((signal) => api<ProvidersResponse>('/api/admin/providers', { signal }), []);
+  const history = useAsync((signal) => api<ProviderHistoryResponse>('/api/admin/provider-history', { signal }), []);
+
+  // 只按原 accountId 解析身份；已删除供应商不会被同名新账号替换。
+  const accountIdentities = (() => {
+    const map = new Map<string, { name: string; deleted: boolean }>();
+    for (const item of history.data?.items ?? []) map.set(item.id, { name: item.name, deleted: true });
+    for (const account of providers.data?.items ?? []) map.set(account.id, { name: account.name, deleted: false });
+    return map;
+  })();
 
   const attempts = detail.data?.attempts ?? [];
   const estimated = aggregateMoney(attempts, 'estimatedCost');
@@ -283,11 +316,25 @@ export function RequestDetailPage({ id }: { id: string }) {
 
           <InlineNote>
             失败、取消、中断与超时的 attempt 也可能产生费用。未知金额与未返回用量都保持未知，不记作 0；完整请求元数据不包含正文或秘密。
+            已删除供应商的历史 attempt 按归档身份显示名称，不会关联到同名新账号。
           </InlineNote>
+
+          {history.error ? (
+            <p className="small muted">
+              历史供应商身份读取失败：{describeError(history.error)}；已删除供应商暂时只显示 accountId。
+            </p>
+          ) : null}
 
           <div className="attempt-list">
             {attempts.length > 0 ? (
-              attempts.map((attempt, index) => <AttemptCard attempt={attempt} index={index} key={attempt.id ?? index} />)
+              attempts.map((attempt, index) => (
+                <AttemptCard
+                  attempt={attempt}
+                  index={index}
+                  key={attempt.id ?? index}
+                  account={attempt.accountId ? accountIdentities.get(attempt.accountId) : undefined}
+                />
+              ))
             ) : (
               <Card>
                 <EmptyState title="没有 attempt 记录" description="这条请求在返回前没有留下任何上游尝试元数据。" />
