@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
 import type {
   Balance,
   Discovery,
+  ManagedResource,
+  ManagedResourceInput,
   Money,
   Price,
   PreparedRequest,
@@ -40,6 +43,58 @@ interface DiscoveredTokens {
   items: TokenRecord[];
   complete: boolean;
   warnings: string[];
+}
+
+/** 清理相关对外文案固定，不透传上游响应正文或任何密钥。 */
+const CLEANUP_MESSAGE = {
+  identity: '无法核验上游账号身份，请检查管理令牌与用户标识后重试。',
+  list: '无法完整读取上游令牌清单，请检查管理权限后重试。',
+  listBeforeDelete: '无法完整读取上游令牌清单，未执行删除；请稍后重试核验。',
+  changed: '上游令牌信息与已记录归属不一致，已停止清理。',
+  key: '无法核验上游令牌凭据，已停止清理。',
+  rejected: '上游拒绝删除该令牌，未确认清理成功。',
+  unknown: '上游删除结果未知，请稍后重新读取令牌清单确认。',
+  cancelled: '清理已取消，上游结果未知。',
+  deleted: '已删除上游令牌。',
+  absent: '上游完整令牌清单已确认该令牌不存在。',
+} as const;
+
+interface UpstreamIdentity {
+  base: string;
+  userId: string;
+  scope: string;
+  secrets: Record<string, string>;
+}
+
+function identityScope(base: string, userId: string): string {
+  return `newapi:${base}#user:${userId}`;
+}
+
+/** 与 SDK 的 credentialFingerprint 保持同一算法；插件产物不依赖 SDK 运行时。 */
+function credentialFingerprint(value: string): string {
+  return createHash('sha256').update(value.replace(/^sk-/, '')).digest('hex');
+}
+
+/** 仅名称以 moris 开头的令牌才进入清理候选；名称前缀不是创建证明。 */
+function isMorisTokenName(name: string): boolean {
+  return /^moris(?:[-_.]|$)/i.test(name.trim());
+}
+
+function resourceRecorder(context: ProviderContext): ((resource: ManagedResourceInput) => Promise<void>) | null {
+  return typeof context.recordResource === 'function' ? context.recordResource.bind(context) : null;
+}
+
+function resourceInput(resource: ManagedResource): ManagedResourceInput {
+  return {
+    kind: resource.kind,
+    scope: resource.scope,
+    externalId: resource.externalId,
+    name: resource.name,
+    ...(resource.group ? { group: resource.group } : {}),
+    ...(resource.fingerprint ? { fingerprint: resource.fingerprint } : {}),
+    provenance: resource.provenance,
+    ...(resource.credentialKey ? { credentialKey: resource.credentialKey } : {}),
+  };
 }
 
 interface ModelOverride {
@@ -162,6 +217,13 @@ function templateFor(context: ProviderContext): TokenTemplate {
       400,
     );
   }
+  if (!isMorisTokenName(namePrefix)) {
+    throw new ProviderError(
+      'tokenTemplate.namePrefix 必须以 moris 开头；本网关不新建其他前缀的令牌',
+      'token_template_invalid',
+      400,
+    );
+  }
   return { ...template, namePrefix, quota, expiresInDays };
 }
 
@@ -243,6 +305,37 @@ async function revealTokenKey(context: ProviderContext, secrets: Record<string, 
     return asString(data?.key) ?? asString(asObject(body)?.key);
   } catch {
     return null;
+  }
+}
+
+async function readIdentity(context: ProviderContext): Promise<UpstreamIdentity> {
+  const base = rootUrl(context.account.baseUrl);
+  const secrets = context.secrets;
+  if (!secrets.accessToken) throw new ProviderError(CLEANUP_MESSAGE.identity, 'cleanup_identity', 502);
+  let self: JsonObject | null = null;
+  try {
+    const body = await fetchJson(context, `${base}/api/user/self`, { headers: managementHeaders(secrets) });
+    self = asObject(unwrap(body));
+  } catch {
+    throw new ProviderError(CLEANUP_MESSAGE.identity, 'cleanup_identity', 502);
+  }
+  const userId = asNumber(self?.id);
+  if (userId == null || !Number.isInteger(userId) || userId <= 0) {
+    throw new ProviderError(CLEANUP_MESSAGE.identity, 'cleanup_identity', 502);
+  }
+  return { base, userId: String(userId), scope: identityScope(base, String(userId)), secrets };
+}
+
+async function readCompleteTokens(context: ProviderContext, secrets: Record<string, string>): Promise<DiscoveredTokens> {
+  try {
+    const list = await listTokens(context, secrets);
+    if (!list.complete) throw new ProviderError(CLEANUP_MESSAGE.list, 'cleanup_list_incomplete', 502);
+    return list;
+  } catch (error) {
+    if (error instanceof ProviderError && error.code === 'aborted') {
+      throw new ProviderError('清理已取消。', 'aborted', 499);
+    }
+    throw new ProviderError(CLEANUP_MESSAGE.list, 'cleanup_list_unavailable', 502);
   }
 }
 
@@ -579,6 +672,31 @@ async function discover(context: ProviderContext): Promise<Discovery> {
   const self = asObject(unwrap(selfBody));
   if (!self) throw new ProviderError('/api/user/self 未返回账号数据', 'account_empty');
 
+  // 归属范围只采用 /api/user/self 返回的实际用户 ID，不单独信任可改的 userId/header/JWT。
+  const selfId = asNumber(self.id);
+  const recorder = resourceRecorder(context);
+  const scope =
+    recorder && selfId != null && Number.isInteger(selfId) && selfId > 0
+      ? identityScope(base, String(selfId))
+      : null;
+  if (recorder && !scope) {
+    warnings.push('无法从 /api/user/self 核验实际用户 ID，未记录上游令牌归属');
+  }
+  const pendingIntentNames = new Set(
+    scope
+      ? (context.managedResources ?? [])
+          .filter(
+            (resource) =>
+              resource.kind === 'token' &&
+              resource.scope === scope &&
+              resource.provenance === 'intent',
+          )
+          .map((resource) => resource.name)
+      : [],
+  );
+  const confirmedCreated = new Map<string, TokenRecord>();
+  const recordedResourceIds = new Set<string>();
+
   let groups: string[] = [];
   try {
     const groupBody = await fetchJson(context, `${base}/api/user/self/groups`, { headers: managementHeaders(secrets) });
@@ -620,7 +738,7 @@ async function discover(context: ProviderContext): Promise<Discovery> {
     if (token) tokenByGroup.set(group, token);
   }
 
-  if (context.account.autoCreateTokens && tokensComplete) {
+  if (context.account.autoCreateTokens && tokensComplete && (!recorder || scope)) {
     const template = templateFor(context);
     const byName = new Map(tokens.map((token) => [token.name, token]));
     const apiKeyGroup = asString(context.account.options.apiKeyGroup);
@@ -630,7 +748,7 @@ async function discover(context: ProviderContext): Promise<Discovery> {
         .map((name) => name.slice('token:'.length)),
     );
     if (apiKeyGroup && secrets.apiKey) existingSecretGroups.add(apiKeyGroup);
-    const created: string[] = [];
+    const created: Array<{ name: string; group: string }> = [];
     for (const group of usableGroups) {
       // 首期仅为具有受支持推理端点的分组创建令牌，不为纯生图／视频分组创建。
       if (!pricingItems.some(item => asArray(item.enable_groups).includes(group) && protocolFor(asArray(item.supported_endpoint_types)))) continue;
@@ -649,8 +767,24 @@ async function discover(context: ProviderContext): Promise<Discovery> {
         tokenByGroup.set(group, sameName);
         continue;
       }
+      if (recorder && scope && pendingIntentNames.has(name)) {
+        warnings.push(`令牌 ${name} 存在待核验的创建意图，已跳过自动创建以避免重复；请人工核验上游清单`);
+        continue;
+      }
+      if (recorder && scope) {
+        // 先持久记录意图，再创建；响应丢失或清单不完整时只保留意图，不重复创建。
+        await recorder({
+          kind: 'token',
+          scope,
+          externalId: `intent:${name}`,
+          name,
+          group,
+          provenance: 'intent',
+          credentialKey: `token:${group}`,
+        });
+      }
       await createToken(context, secrets, quotaPerUnit, template, group, name);
-      created.push(name);
+      created.push({ name, group });
     }
     if (created.length) {
       const refreshed = await listTokens(context, secrets);
@@ -664,24 +798,128 @@ async function discover(context: ProviderContext): Promise<Discovery> {
         const token = chooseTokenForGroup(tokens, group, managedPrefix, allowUserTokens);
         if (token) tokenByGroup.set(group, token);
       }
-      for (const name of created) {
-        const found = tokens.find((token) => token.name === name);
-        if (!found) warnings.push(`已创建令牌 ${name}，但重新读取列表未找到`);
+      for (const { name, group } of created) {
+        const matches = tokens.filter((token) => token.name === name);
+        if (!refreshed.complete) {
+          warnings.push(`已创建令牌 ${name}，但重新读取分页不完整，保留待核验意图`);
+        } else if (matches.length === 1 && matches[0]?.group === group) {
+          confirmedCreated.set(name, matches[0]);
+        } else if (matches.length > 1) {
+          warnings.push(`已创建令牌 ${name}，但上游存在 ${matches.length} 个同名令牌，保留待核验意图`);
+        } else if (matches.length === 1) {
+          warnings.push(`已创建令牌 ${name}，但上游同名令牌分组不一致，保留待核验意图`);
+        } else {
+          warnings.push(`已创建令牌 ${name}，但重新读取列表未找到，保留待核验意图`);
+        }
       }
     }
   } else if (context.account.autoCreateTokens) {
-    warnings.push('令牌分页不完整，已跳过自动创建，避免重复创建令牌');
+    if (recorder && !scope) {
+      warnings.push('无法从 /api/user/self 核验实际用户 ID，已跳过自动创建，避免产生无归属证据的令牌');
+    } else {
+      warnings.push('令牌分页不完整，已跳过自动创建，避免重复创建令牌');
+    }
   }
 
   for (const [group, token] of tokenByGroup) {
     const secretName = `token:${group}`;
     if (context.secrets[secretName]) continue;
     const key = await revealTokenKey(context, secrets, token);
+    if (recorder && scope && isMorisTokenName(token.name)) {
+      const createdToken = confirmedCreated.get(token.name);
+      if (createdToken && createdToken.id === token.id) {
+        await recorder({
+          kind: 'token',
+          scope,
+          externalId: String(token.id),
+          name: token.name,
+          group,
+          provenance: 'created',
+          credentialKey: secretName,
+          ...(key ? { fingerprint: credentialFingerprint(key) } : {}),
+        });
+        confirmedCreated.delete(token.name);
+        recordedResourceIds.add(String(token.id));
+      } else if (key) {
+        // 复用只建立引用，不声明创建归属。
+        await recorder({
+          kind: 'token',
+          scope,
+          externalId: String(token.id),
+          name: token.name,
+          group,
+          provenance: 'reused',
+          credentialKey: secretName,
+          fingerprint: credentialFingerprint(key),
+        });
+        recordedResourceIds.add(String(token.id));
+      }
+    }
     if (!key) {
       warnings.push(`分组 ${group} 的令牌 ${token.name} 无法读取完整 key，相关模型不启用`);
       continue;
     }
     if (context.secrets[secretName] !== key) secretsPatch[secretName] = key;
+  }
+
+  if (recorder && scope) {
+    // 已唯一确认 ID 但未能在凭据循环中处理时，仍记录创建归属（指纹可后续补全）。
+    for (const [name, token] of confirmedCreated) {
+      if (recordedResourceIds.has(String(token.id))) continue;
+      await recorder({
+        kind: 'token',
+        scope,
+        externalId: String(token.id),
+        name,
+        group: token.group,
+        provenance: 'created',
+      });
+      recordedResourceIds.add(String(token.id));
+      confirmedCreated.delete(name);
+    }
+
+    if (tokensComplete) {
+      const credentials: Array<{ secretName: string; group: string; value: string }> = [];
+      for (const [secretName, value] of Object.entries(context.secrets)) {
+        if (!secretName.startsWith('token:') || !value) continue;
+        credentials.push({ secretName, group: secretName.slice('token:'.length), value });
+      }
+      const apiKeyGroup = asString(context.account.options.apiKeyGroup);
+      if (apiKeyGroup && context.secrets.apiKey) {
+        credentials.push({ secretName: 'apiKey', group: apiKeyGroup, value: context.secrets.apiKey });
+      }
+      const byGroup = new Map<string, Array<{ secretName: string; value: string }>>();
+      for (const credential of credentials) {
+        const list = byGroup.get(credential.group) ?? [];
+        list.push({ secretName: credential.secretName, value: credential.value });
+        byGroup.set(credential.group, list);
+      }
+      for (const token of tokens) {
+        if (!isMorisTokenName(token.name)) continue;
+        const id = String(token.id);
+        if (recordedResourceIds.has(id)) continue;
+        const saved = byGroup.get(token.group);
+        if (!saved?.length) continue;
+        const key = await revealTokenKey(context, secrets, token);
+        if (!key) continue;
+        const fingerprint = credentialFingerprint(key);
+        const match = saved.find((credential) => credentialFingerprint(credential.value) === fingerprint);
+        if (!match) continue;
+        await recorder({
+          kind: 'token',
+          scope,
+          externalId: id,
+          name: token.name,
+          group: token.group,
+          provenance: 'reused',
+          credentialKey: match.secretName,
+          fingerprint,
+        });
+        recordedResourceIds.add(id);
+      }
+    } else {
+      warnings.push('令牌分页不完整，未记录既有令牌的复用引用');
+    }
   }
   if (Object.keys(secretsPatch).length) await context.updateSecrets(secretsPatch);
   const effectiveSecrets = { ...secrets, ...secretsPatch };
@@ -917,6 +1155,222 @@ function estimate(price: Price, usage: Usage, body: Record<string, unknown>): Mo
   return tokenCost(price, usage);
 }
 
+interface CleanupCandidate {
+  resource: ManagedResourceInput;
+  verified: boolean;
+  reason?: string;
+  /** 仅在身份与完整清单已核验且可信记录带指纹、上游已无该 ID 时为 true。 */
+  absent?: boolean;
+}
+
+function failedCleanup(message: string = CLEANUP_MESSAGE.changed): { state: 'failed'; message: string } {
+  return { state: 'failed', message };
+}
+
+/**
+ * 只读预览：读取 /api/user/self 与实际用户身份和完整令牌清单。
+ * 不创建、不调用 discover、不删除；只对 moris 候选读取 key 并计算不可逆指纹。
+ */
+async function cleanupPreview(context: ProviderContext): Promise<CleanupCandidate[]> {
+  const identity = await readIdentity(context);
+  const list = await readCompleteTokens(context, identity.secrets);
+  const candidates = new Map<string, CleanupCandidate>();
+  const claimed = new Set<string>();
+
+  const trusted = (context.managedResources ?? []).filter(
+    (resource) =>
+      resource.kind === 'token' &&
+      resource.scope === identity.scope &&
+      Array.isArray(resource.accountIds) &&
+      resource.accountIds.includes(context.account.id) &&
+      (resource.provenance === 'created' || resource.provenance === 'adopted'),
+  );
+  for (const record of trusted) {
+    claimed.add(record.externalId);
+    const token = list.items.find((item) => String(item.id) === record.externalId);
+    if (!token) {
+      candidates.set(record.externalId, {
+        resource: resourceInput(record),
+        verified: false,
+        reason: '上游完整令牌清单已确认该令牌不存在；执行时会再次核验。',
+        ...(record.fingerprint ? { absent: true } : {}),
+      });
+      continue;
+    }
+
+    let verified = true;
+    let reason: string | undefined;
+    if (token.name !== record.name) {
+      verified = false;
+      reason = '上游令牌名称与已记录归属不一致。';
+    } else if (!record.group || token.group !== record.group) {
+      verified = false;
+      reason = '上游令牌分组与已记录归属不一致。';
+    } else if (!isMorisTokenName(token.name)) {
+      verified = false;
+      reason = '仅核验名称以 moris 开头的受管令牌。';
+    } else if (!record.fingerprint) {
+      verified = false;
+      reason = '缺少已记录凭据指纹，无法核验令牌。';
+    } else {
+      const key = await revealTokenKey(context, identity.secrets, token);
+      if (!key || credentialFingerprint(key) !== record.fingerprint) {
+        verified = false;
+        reason = '无法核验令牌凭据与已记录指纹一致。';
+      }
+    }
+    candidates.set(record.externalId, {
+      resource: resourceInput(record),
+      verified,
+      ...(reason ? { reason } : {}),
+    });
+  }
+
+  const savedByGroup = new Map<string, Array<{ secretName: string; value: string }>>();
+  for (const [secretName, value] of Object.entries(context.secrets)) {
+    if (!secretName.startsWith('token:') || !value) continue;
+    const group = secretName.slice('token:'.length);
+    const saved = savedByGroup.get(group) ?? [];
+    saved.push({ secretName, value });
+    savedByGroup.set(group, saved);
+  }
+  const apiKeyGroup = asString(context.account.options.apiKeyGroup);
+  if (apiKeyGroup && context.secrets.apiKey) {
+    const saved = savedByGroup.get(apiKeyGroup) ?? [];
+    saved.push({ secretName: 'apiKey', value: context.secrets.apiKey });
+    savedByGroup.set(apiKeyGroup, saved);
+  }
+
+  for (const token of list.items) {
+    if (!isMorisTokenName(token.name)) continue;
+    const id = String(token.id);
+    if (claimed.has(id)) continue;
+    const saved = savedByGroup.get(token.group);
+    if (!saved?.length) continue;
+    const key = await revealTokenKey(context, identity.secrets, token);
+    if (!key) continue;
+    const fingerprint = credentialFingerprint(key);
+    const match = saved.find((credential) => credentialFingerprint(credential.value) === fingerprint);
+    if (!match) continue;
+    candidates.set(id, {
+      resource: {
+        kind: 'token',
+        scope: identity.scope,
+        externalId: id,
+        name: token.name,
+        group: token.group,
+        fingerprint,
+        provenance: 'reused',
+        credentialKey: match.secretName,
+      },
+      verified: true,
+    });
+    claimed.add(id);
+  }
+
+  return Array.from(candidates.values());
+}
+
+async function deleteTokenOnce(
+  context: ProviderContext,
+  identity: UpstreamIdentity,
+  token: TokenRecord,
+): Promise<{ state: 'deleted' | 'absent' | 'failed' | 'unknown'; message: string }> {
+  let response: Response;
+  try {
+    response = await context.fetch(`${identity.base}/api/token/${token.id}`, {
+      method: 'DELETE',
+      headers: managementHeaders(identity.secrets),
+      signal: context.signal,
+    });
+  } catch {
+    return { state: 'unknown', message: context.signal.aborted ? CLEANUP_MESSAGE.cancelled : CLEANUP_MESSAGE.unknown };
+  }
+
+  let body: unknown = null;
+  try {
+    const text = await response.text();
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
+  }
+
+  if (response.status === 200) {
+    const object = asObject(body);
+    if (object?.success === true) return { state: 'deleted', message: CLEANUP_MESSAGE.deleted };
+    if (object?.success === false) return { state: 'failed', message: CLEANUP_MESSAGE.rejected };
+    return { state: 'unknown', message: CLEANUP_MESSAGE.unknown };
+  }
+
+  if (response.status === 404) {
+    // 404 不能直接视为已不存在；用完整清单确认后才允许记为 absent。
+    try {
+      const after = await readCompleteTokens(context, identity.secrets);
+      if (after.items.some((item) => item.id === token.id)) {
+        return { state: 'failed', message: CLEANUP_MESSAGE.rejected };
+      }
+      return { state: 'absent', message: CLEANUP_MESSAGE.absent };
+    } catch {
+      return { state: 'unknown', message: CLEANUP_MESSAGE.unknown };
+    }
+  }
+
+  if (response.status >= 500) return { state: 'unknown', message: CLEANUP_MESSAGE.unknown };
+  return { state: 'failed', message: CLEANUP_MESSAGE.rejected };
+}
+
+/**
+ * 单令牌清理。每次执行都重新核验身份、完整清单、ID、名称、分组与凭据指纹；
+ * 不按前缀批量删除，不删除管理 accessToken、账号或订阅。
+ */
+async function cleanupExecute(
+  context: ProviderContext,
+  resource: ManagedResourceInput,
+): Promise<{ state: 'deleted' | 'absent' | 'failed' | 'unknown'; message?: string }> {
+  if (
+    resource.kind !== 'token' ||
+    resource.provenance === 'intent' ||
+    !/^\d+$/.test(resource.externalId) ||
+    !resource.name ||
+    !resource.group ||
+    !resource.fingerprint ||
+    !resource.scope
+  ) {
+    return failedCleanup();
+  }
+
+  let identity: UpstreamIdentity;
+  try {
+    identity = await readIdentity(context);
+  } catch {
+    return context.signal.aborted
+      ? { state: 'unknown', message: CLEANUP_MESSAGE.cancelled }
+      : failedCleanup(CLEANUP_MESSAGE.identity);
+  }
+  if (identity.scope !== resource.scope) return failedCleanup();
+
+  let list: DiscoveredTokens;
+  try {
+    list = await readCompleteTokens(context, identity.secrets);
+  } catch {
+    return context.signal.aborted
+      ? { state: 'unknown', message: CLEANUP_MESSAGE.cancelled }
+      : failedCleanup(CLEANUP_MESSAGE.listBeforeDelete);
+  }
+
+  const token = list.items.find((item) => String(item.id) === resource.externalId);
+  if (!token) return { state: 'absent', message: CLEANUP_MESSAGE.absent };
+  if (token.name !== resource.name || token.group !== resource.group) return failedCleanup();
+  if (!isMorisTokenName(token.name)) return failedCleanup();
+
+  const key = await revealTokenKey(context, identity.secrets, token);
+  if (!key || credentialFingerprint(key) !== resource.fingerprint) {
+    return failedCleanup(CLEANUP_MESSAGE.key);
+  }
+
+  return deleteTokenOnce(context, identity, token);
+}
+
 export const plugin: ProviderPlugin = {
   id: 'realseek',
   name: 'New API 兼容站点',
@@ -949,6 +1403,10 @@ export const plugin: ProviderPlugin = {
       hint: '开启后按「名称前缀-分组」创建专用令牌，并优先复用匹配前缀的既有令牌；名称前缀建议保留 moris。不会使用、修改或删除其他令牌。',
     },
     authorization: { supported: false, hint: 'New API 使用管理令牌，不支持设备授权。' },
+  },
+  cleanup: {
+    preview: cleanupPreview,
+    execute: cleanupExecute,
   },
   discover,
   prepare,

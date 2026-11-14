@@ -68,7 +68,7 @@ export interface ProviderPlugin {
   /** 后台表单的插件专属默认值与字段说明。 */
   setup?: ProviderSetup;
   cleanup?: {
-    preview(context: ProviderContext): Promise<Array<{ resource: ManagedResourceInput; verified: boolean; reason?: string }>>;
+    preview(context: ProviderContext): Promise<Array<{ resource: ManagedResourceInput; verified: boolean; absent?: boolean; reason?: string }>>;
     execute(context: ProviderContext, resource: ManagedResourceInput): Promise<{ state: 'deleted' | 'absent' | 'failed' | 'unknown'; message?: string }>;
   };
   discover(context: ProviderContext): Promise<Discovery>;
