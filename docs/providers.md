@@ -1,7 +1,7 @@
 # 供应商插件实现说明
 
-日期：2026-11-13
-状态：已实现独立插件包与固定响应测试；realseek 已完成本机专用令牌、目录参数和余额同步，**尚未执行真实推理／付费请求**。其余供应商真实认证与额度查询未验收。
+日期：2026-11-14
+状态：已实现独立插件包与固定响应测试；realseek 已完成本机专用令牌、目录参数、余额同步与可选上游清理契约，**尚未执行真实推理／付费请求，也未在真实站点创建或删除令牌**。其余供应商真实认证与额度查询未验收。
 
 本文记录 `packages/providers/**` 的实现依据、凭据字段、行为边界和仍需目标实例验证的事实。产品需求见 `docs/PRD.md`。
 
@@ -32,6 +32,7 @@
 - `monitor` 的 `sampledAt` 使用 `ctx.now()`；时间均为 ISO 8601，窗口重置时间来自上游原值。
 - `ProviderModel.available` 表示独立于参数完整度的权限／凭据可用性；false 不允许手工参数恢复。`unknownParameters` 区分未知能力与已知 false。旧插件未提供 available 时，以 enabled 为保守边界。
 - 网关统一参数编辑按完整业务模型 ID 单独存储；插件同步只更新自动快照。覆盖优先级最高，清空后恢复插件自动值（包括原有 `options.modelOverrides`）。当前插件 SDK 只有服务端能力，不支持注册前端页面。
+- 可选清理：`ProviderPlugin.cleanup` 仅声明 `preview`/`execute`，核心只执行插件声明的动作，不接受浏览器传入的 URL、脚本或资源对象。`ProviderContext` 可选提供 `managedResources` 与 `recordResource`，用于非秘密归属证据；旧插件缺少该钩子时保持兼容，只做本地删除。
 
 ## 2. realseek / New API 兼容插件
 
@@ -154,6 +155,43 @@ perRequest = model_price * group_ratio
 - 本账号设置 `managedTokenPrefix=moris`、`allowUserTokens=false`，不注入手工 `apiKey`，仅保存经专用令牌列表核验的分组 key。
 - 余额监控返回 `ok`；完整同步 全部分组模型路径。目前可调用 0 条，均因缺少可信模型参数停用。`modelsDev=true` 不会在多个同名供应商条目间自行选择；需要指定来源或提供有证据的 `modelOverrides`。
 - 未发起模型调用；真实响应、SSE、工具调用及扣费仍待验收。Gemini 原生端点及纯生图／视频分组不在本次创建范围。
+
+### 2.8 上游资源归属与清理（realseek）
+
+可选契约：
+
+- `ProviderPlugin.cleanup.preview(ctx)` 返回 `{resource,verified,reason?,absent?}[]`；`execute(ctx,resource)` 返回 `{state:"deleted"|"absent"|"failed"|"unknown",message?}`。仅 realseek 声明该能力；核心只协调已声明动作。
+- `ProviderContext.managedResources?: ManagedResource[]` 提供同插件资源记录；`recordResource?(input)` 持久化非秘密归属证据。旧上下文没有回调时保持原有 discover 行为，不新增危险行为。
+- `ManagedResourceInput` 的 `provenance` 区分 `created`（本网关创建）、`adopted`（管理员逐项确认纳入）、`reused`（仅引用，不声明拥有）和 `intent`（创建意图）。`credentialKey` 指向本地秘密槽位，不保存明文。
+- `scope` 必须由归一化上游 rootUrl 与 `/api/user/self` 返回的实际用户 ID 组成（本插件格式 `newapi:<root>#user:<id>`），不能只信任可改的 userId、header 或 JWT。
+- `fingerprint` 为凭据的不可逆摘要（去掉 `sk-` 前缀后 SHA256），只用于归属核验和共享保护；不得作为可用密钥，也不回传浏览器。
+
+discover 归属：
+
+- 自动创建前先记录 `intent`，`externalId="intent:<name>"`；创建响应本身不保证返回 ID。
+- 创建后重新读取完整令牌清单，只有同名、同分组且唯一匹配时才记录实际 ID 为 `created`；取回完整 key 后补充指纹。
+- 创建响应丢失、分页不完整、并发出现多个同名令牌时保留 `intent`，不猜归属、不盲目重复创建。之后凭据轮换且同名令牌已不存在时，也会因待核验 intent 保持保守不重建，需人工核验。
+- 复用既有令牌（包括已保存 `token:<group>` 和 `apiKeyGroup` 的 `apiKey`）只记录 `reused` 引用，必须能通过 key 指纹核验；正常 discover 不把既有令牌自动认领为 `created` 或 `adopted`。
+- 有 `recordResource` 但 `/api/user/self` 缺少实际用户 ID 时，跳过自动创建，避免产生无归属证据的新资源。
+- `tokenTemplate.namePrefix` 必须以 `moris` 开头；非 moris 前缀拒绝新建。清理流程中，其他前缀/其他名称的既有令牌不取钥、不调用、不修改、不删除；这不改变已有推理接入的显式凭据配置。
+
+cleanup.preview：
+
+- 只读取 `/api/user/self` 与实际用户身份、完整令牌清单；不调用 discover、不创建、不修改、不删除上游资源。
+- 可信候选仅为当前账号 `accountIds` 引用、同 `scope` 的 `created`/`adopted` 记录；其他账号拥有的记录不会因同 scope 出现在本账号候选。
+- 上游仍存在时核验 ID、名称、分组与 key 指纹；只有身份、ID、分组、key 都核验才 `verified=true`。名称前缀不是创建证明。
+- 可信记录带指纹且完整清单已确认该 ID 不存在时返回 `absent=true`，供核心区分“身份变化/无法核验”和“确认不存在”；`verified` 仍为 false。
+- 没有归属记录时，只允许名称以 `moris` 开头、且与当前保存的 `token:<group>`/`apiKey` 指纹匹配的令牌作为 `reused` 候选；非 moris 令牌不取钥。
+- 预览只对符合上述条件的 moris 候选读取 key，不显示或持久化明文 key。
+
+cleanup.execute：
+
+- 每次执行都重新核验 `scope`、`/api/user/self`、读取权限、完整清单、ID、名称、分组和指纹；不凭名称前缀直接删除。
+- 只对单个数值 ID 调用公开 New API 的 `DELETE /api/token/:id`；不做按前缀批量删除，不删除管理 accessToken、账号、额度或订阅。
+- HTTP 200 且 JSON `success:true` 记为 `deleted`；HTTP 200 但 `success:false` 记为 `failed`；4xx 拒绝记为 `failed`，404 不直接当 `absent`，需重新读取完整清单确认。5xx、超时、网络异常或响应不明确记为 `unknown`，无隐式重试。
+- 重试前重新读取清单；只有完整清单确认 ID 不存在才能记为 `absent`。错误文案固定，不透传上游正文或密钥。
+
+验证边界：实现依据是公开 New API 的 `router/api-router.go` 与 `controller/token.go`（`DELETE /api/token/:id` 按当前用户 ID 删除，`AddToken` 成功响应不返回新 ID）加本地 Mock。**未在真实站点创建或删除令牌，未发起收费推理**；目标站点版本、管理权限和删除权限仍需人工核验。
 
 ## 3. DeepSeek 官方插件
 
@@ -313,21 +351,29 @@ type DeviceAuthorizationPoll =
 
 仍需目标账号验证：OAuth 授权服务产出的 token 结构、workspace/account id、`/models` 的 `client_version` 门槛、`wham/usage` 实际字段（尤其 `reset_at` 是秒还是其它形式）、可用模型与套餐窗口、401 后的重新授权流程。插件内部不重试，401 由核心策略处理。
 
-## 6. 测试与验证记录
+## 6. 其他插件的上游清理边界
 
-测试文件：`tests/providers.test.ts`。
+- DeepSeek、vm2api 与 openai-subscription 当前**没有**声明 `cleanup`；供应商彻底删除只删除本地配置、加密凭据、目录、监控和代理绑定，不声称撤销上游授权、注销账号或取消订阅。
+- 不猜测 OpenAI / DeepSeek / vm2api 的令牌撤销、账号注销或订阅取消接口；没有经过公开契约和权限核验的动作不执行。
+- openai-subscription 的 OAuth 授权属于本地凭据；删除供应商不会伪造“已注销”结果，也不会尝试刷新、撤销或替换上游账号。
+- 停机、失败或取消时，未声明的上游资源仍然有效；管理界面和任务结果必须显示“仅删除本地”，并要求人工到上游处理。
+
+## 7. 测试与验证记录
+
+测试文件：`tests/providers.test.ts`、`tests/realseek-cleanup.test.ts`。
 
 运行：
 
 ```powershell
-mise exec -- npx tsx --test tests/providers.test.ts
+mise exec -- npx tsx --test tests/providers.test.ts tests/realseek-cleanup.test.ts
 ```
 
-结果（2026-11-13）：16 个测试全部通过，约 0.8s。
+结果（2026-11-14）：providers 19 项 + realseek cleanup 16 项，共 35 项全部通过；定向 `tsc --noEmit` 通过。
 
 覆盖：
 
-- realseek：账号分组权限过滤、删组后缓存 token/secret 不复活旧路径、公开 pricing 不足以生成目录、分页异常传播、复杂表达式保留与有限求值、缺失参数 `null`+`enabled=false`、`token:<group>` 凭据、apiKey 回退写实际 `credentialKey`、未知价格不禁用/估算 null、显式 token 不被覆盖、用户 token 默认不启用、自动创建模板校验、创建请求字段、复用已有令牌、不调用 `PUT`/`DELETE`。
+- realseek：账号分组权限过滤、删组后缓存 token/secret 不复活旧路径、公开 pricing 不足以生成目录、分页异常传播、复杂表达式保留与有限求值、缺失参数 `null`+`enabled=false`、`token:<group>` 凭据、apiKey 回退写实际 `credentialKey`、未知价格不禁用/估算 null、显式 token 不被覆盖、用户 token 默认不启用、自动创建模板校验、创建请求字段、复用已有令牌；discover 测试不调用 `PUT`/`DELETE`。
+- realseek 清理：intent→created 唯一 ID 确认、复用只记 reused、响应丢失/同名多匹配保留 intent 且不重复创建、缺实际用户 ID 时禁止自动创建、非 moris 前缀拒绝新建、预览只读与账号归属过滤、非 moris 不取钥、可信 absent 标记、身份变更拒删、200 `success:true`/`success:false`、404 重列确认、网络异常 unknown、清单不完整不删除。
 - DeepSeek：官方 `/models` 字段、复杂峰谷价格、`deepSeekCost` 峰谷/节假日、余额、请求准备与客户端 Authorization/URL 不透传。
 - vm2api：Key 作用域目录、协议选择、未知价格不禁用、`/v1/me/quota` 余额与 `pool=default` 窗口、缺失 used/remaining 不按 0 发布、messages 准备。
 - OpenAI：过期 access token 刷新、刷新响应轮换、`chatgpt-account-id`/`originator` 头、`/models`、`/responses` 准备（`store=false`/`stream=true`/`responseFormat=sse`/移除 max 参数）、`/wham/usage` 窗口与 `pool=default`、缺少凭据时明确失败、有效 token 不触发刷新；device flow 的 usercode 请求、403 pending、成功换 token 的表单字段与 `updateSecrets` 持久化；models.dev 阶梯按 `usage.input` 取档、缓存价缺失返回 null。
@@ -340,11 +386,16 @@ mise exec -- npx tsx --test tests/providers.test.ts
 - 每个测试设置 `timeout: 5000`。
 - 不请求真实付费 API，不读取真实凭据。
 
-未执行：真实账号认证、真实付费请求、真实余额/额度查询、目标实例版本兼容性、OpenCode/OpenChamber 联调。全仓 `npm run typecheck`/`npm test` 在本次实现时仍被其他目录的并发改动阻塞（`tests/clients.test.ts` 的 `transforms` 类型/运行错误）；`packages/providers/**` 与 `tests/providers.test.ts` 定向 `tsc` 无报错，`tests/providers.test.ts` 16 个测试全部通过。
+未执行：真实账号认证、真实付费请求、真实余额/额度查询、真实上游令牌创建或删除、目标实例版本兼容性、OpenCode/OpenChamber 联调。本轮未运行全仓 `npm test`；仅执行上述定向测试与类型检查。
 
-## 7. 已知限制
+## 8. 已知限制
 
 - New API 的令牌分组、价格和权限随站点版本/配置变化；插件只按读取到的事实生成目录。
+- realseek 清理契约按公开 New API 主线与本地 Mock 实现；目标站点版本、管理权限、分页与删除接口仍需人工核验。上线后不得以现有业务令牌做删除验收。
+- 已记录 `intent` 会保留审计；若之后凭据轮换且同名令牌已不存在，插件会保持保守而不自动重建，需要管理员重新核验后处理。
+- 非 moris 前缀的 `tokenTemplate.namePrefix` 会被拒绝新建；既有非 moris 令牌不会进入清理候选，也不会被取钥、修改或删除。
+- 可信记录缺少指纹或上游仍存在但信息不一致时，清理预览会标记不可执行；不能靠名称前缀或中文原因文本推断可删除。
+- 删除后的既有数据库备份不自动清理，仍可能包含历史加密凭据；恢复备份不能恢复已撤销的上游资源。
 - realseek 的 `pricing_version` 仅作为来源版本保存；历史价格快照与账本版本化由核心实现。
 - 复杂计价表达式只支持有限子集；时间、header、任务用量、图像/音频 token 无法从当前 `Usage` 契约获得时返回 `null`，不会估算。
 - DeepSeek 高峰/低谷依赖当前时间与节假日；`estimate` 不猜，核心需调用 `deepSeekCost`。
