@@ -117,6 +117,40 @@ export interface ProviderAccount {
   options: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  deletionTaskId?: string;
+}
+/** 活动配置删除后，仅保留账务身份，不含任何连接配置或凭据。 */
+export interface ProviderHistory {
+  id: string; name: string; namespace: string; plugin: string; billingType: BillingType;
+  createdAt: string; deletedAt: string;
+}
+export interface ManagedResourceInput {
+  kind: 'token'; scope: string; externalId: string; name: string; group?: string;
+  /** 不可逆凭据摘要，仅用于核验及共享保护；绝不是可用的令牌。 */
+  fingerprint?: string;
+  provenance: 'created' | 'adopted' | 'reused' | 'intent';
+  credentialKey?: string;
+}
+export interface ManagedResource extends ManagedResourceInput {
+  id: string; plugin: string; accountIds: string[]; createdAt: string; updatedAt: string;
+}
+export interface DeletionAction {
+  id: string; name: string; externalId: string; group?: string;
+  disposition: 'ready' | 'adopt' | 'blocked' | 'shared';
+  reason?: string; defaultSelected: boolean;
+  references: Array<{ id: string; name: string }>;
+  state: 'pending' | 'running' | 'deleted' | 'absent' | 'skipped' | 'failed' | 'unknown';
+}
+export interface DeletionPreview {
+  revision: string; expiresAt: string;
+  account: Pick<ProviderAccount, 'id' | 'name' | 'namespace'>;
+  cleanupSupported: boolean; actions: DeletionAction[]; unsettledAttempts: number; warnings: string[];
+}
+export interface ProviderDeletion {
+  id: string; accountId: string; name: string; namespace: string;
+  status: 'draining' | 'cleaning' | 'failed' | 'paused' | 'completed' | 'cancelled';
+  actions: DeletionAction[]; createdAt: string; updatedAt: string;
+  cancelRequested?: boolean; message?: string;
 }
 export interface Balance {
   currency: string;

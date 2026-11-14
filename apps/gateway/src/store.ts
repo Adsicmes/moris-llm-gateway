@@ -1,11 +1,16 @@
 import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DEFAULT_SETTINGS, type CatalogModel, type ModelParameterOverrides, type ModelParameterState, type Money, type Price, type ProviderAccount, type ProviderModel, type ProviderMonitor, type Settings, type Usage } from '../../../packages/contracts/src/index.js';
 import { resolveModelParameters } from './model-parameters.js';
 import { hashSecret, newSecret, passwordHash, Vault } from './security.js';
 import type { ProxyProfile } from '../../../packages/contracts/src/index.js';
+import type { ManagedResource, ManagedResourceInput, ProviderDeletion, ProviderHistory } from '../../../packages/contracts/src/index.js';
+
+export interface StoredDeletion extends ProviderDeletion {
+  resources: Record<string, ManagedResourceInput>;
+}
 
 export interface RequestRecord {
   id: string; modelId: string; deviceId: string; startedAt: string; finishedAt: string | null;
@@ -40,6 +45,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, namespace TEXT UNIQUE NOT NULL, value TEXT NOT NULL, secrets TEXT NOT NULL, sync TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS proxies (id TEXT PRIMARY KEY, value TEXT NOT NULL, secrets TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS provider_history (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS managed_resources (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS provider_deletions (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS models (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), value TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS models_account ON models(account_id);
       CREATE TABLE IF NOT EXISTS monitors (account_id TEXT PRIMARY KEY REFERENCES accounts(id), value TEXT NOT NULL);
@@ -63,6 +71,10 @@ export class Store {
     for (const attempt of this.attempts().filter(x => x.status === 'running')) {
       this.saveAttempt({ ...attempt, status: 'interrupted', finishedAt: new Date().toISOString() });
     }
+    for (const task of this.deletions().filter(item => ['draining', 'cleaning'].includes(item.status))) {
+      this.saveDeletion({ ...task, status: 'paused', message: '网关已重启，请核验并手动继续；不会自动重发上游删除。',
+        actions: task.actions.map(action => action.state === 'running' ? { ...action, state: 'unknown' } : action), updatedAt: new Date().toISOString() });
+    }
   }
   getMeta<T>(key: string): T | undefined { return decode<T>(this.db.prepare('SELECT value FROM meta WHERE key=?').get(key)); }
   setMeta(key: string, value: unknown): void { this.db.prepare('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value)); }
@@ -79,6 +91,51 @@ export class Store {
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   accounts(): ProviderAccount[] { return this.db.prepare('SELECT value FROM accounts ORDER BY namespace').all().map(row => decode<ProviderAccount>(row)!); }
+  history(): ProviderHistory[] { return this.db.prepare('SELECT value FROM provider_history ORDER BY id').all().map(row => decode<ProviderHistory>(row)!); }
+  historicalAccount(id: string): ProviderHistory | undefined { return decode<ProviderHistory>(this.db.prepare('SELECT value FROM provider_history WHERE id=?').get(id)); }
+  resources(): ManagedResource[] { return this.db.prepare('SELECT value FROM managed_resources ORDER BY id').all().map(row => decode<ManagedResource>(row)!); }
+  recordResource(plugin: string, accountId: string, input: ManagedResourceInput): ManagedResource {
+    if (!this.account(accountId)) throw new Error('供应商不存在，不能重新写入资源记录');
+    const id = createHash('sha256').update(JSON.stringify([plugin, input.kind, input.scope, input.externalId])).digest('hex');
+    const old = decode<ManagedResource>(this.db.prepare('SELECT value FROM managed_resources WHERE id=?').get(id));
+    const trusted = old && ['created', 'adopted'].includes(old.provenance);
+    if (trusted && input.fingerprint && old.fingerprint && input.fingerprint !== old.fingerprint) throw new Error('资源凭据已变更，需重新核验');
+    const now = new Date().toISOString();
+    const value: ManagedResource = { ...input, fingerprint: input.fingerprint ?? old?.fingerprint, id, plugin, provenance: trusted ? old.provenance : input.provenance,
+      accountIds: [...new Set([...(old?.accountIds ?? []), accountId])], createdAt: old?.createdAt ?? now, updatedAt: now };
+    this.db.prepare('INSERT INTO managed_resources VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(value));
+    return value;
+  }
+  deletions(): StoredDeletion[] { return this.db.prepare('SELECT value FROM provider_deletions ORDER BY id').all().map(row => decode<StoredDeletion>(row)!); }
+  deletion(id: string): StoredDeletion | undefined { return decode<StoredDeletion>(this.db.prepare('SELECT value FROM provider_deletions WHERE id=?').get(id)); }
+  saveDeletion(task: StoredDeletion): void { this.db.prepare('INSERT INTO provider_deletions VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(task.id, JSON.stringify(task)); }
+  deleting(id: string): boolean { return Boolean(this.account(id)?.deletionTaskId); }
+  /** 只有协调器排空并完成上游动作后调用；账本及历史金额一字不改。 */
+  completeDeletion(taskId: string): void {
+    this.transaction(() => {
+      const task = this.deletion(taskId);
+      if (!task || task.status !== 'cleaning' || task.actions.some(action => !['deleted', 'absent', 'skipped'].includes(action.state))) throw new Error('删除任务尚未完成');
+      const account = this.account(task.accountId);
+      if (!account || account.deletionTaskId !== task.id) throw new Error('供应商删除状态已改变');
+      const modelIds = this.db.prepare('SELECT id FROM models WHERE account_id=?').all(account.id).map(row => String(row.id));
+      const history: ProviderHistory = { id: account.id, name: account.name, namespace: account.namespace, plugin: account.plugin,
+        billingType: account.billingType, createdAt: account.createdAt, deletedAt: new Date().toISOString() };
+      this.db.prepare('INSERT INTO provider_history VALUES (?,?)').run(account.id, JSON.stringify(history));
+      for (const id of modelIds) this.db.prepare('DELETE FROM meta WHERE key=?').run(`model-parameters:${id}`);
+      const settings = this.settings();
+      settings.fallback = Object.fromEntries(Object.entries(settings.fallback).filter(([source]) => !modelIds.includes(source))
+        .map(([source, targets]) => [source, targets.filter(id => !modelIds.includes(id))]).filter(([, targets]) => (targets as string[]).length));
+      this.saveSettings(settings);
+      this.db.prepare('DELETE FROM models WHERE account_id=?').run(account.id);
+      this.db.prepare('DELETE FROM monitors WHERE account_id=?').run(account.id);
+      this.db.prepare('DELETE FROM meta WHERE key=?').run(`recordingSince:${account.id}`);
+      for (const resource of this.resources().filter(item => item.accountIds.includes(account.id))) {
+        this.db.prepare('UPDATE managed_resources SET value=? WHERE id=?').run(JSON.stringify({ ...resource, accountIds: resource.accountIds.filter(id => id !== account.id) }), resource.id);
+      }
+      this.db.prepare('DELETE FROM accounts WHERE id=?').run(account.id);
+      this.saveDeletion({ ...task, status: 'completed', updatedAt: new Date().toISOString(), message: '本地配置与凭据已删除；历史账本保留。' });
+    });
+  }
   proxies(): ProxyProfile[] { return this.db.prepare('SELECT value FROM proxies ORDER BY id').all().map(row => decode<ProxyProfile>(row)!); }
   proxy(id: string): ProxyProfile | undefined { return decode<ProxyProfile>(this.db.prepare('SELECT value FROM proxies WHERE id=?').get(id)); }
   proxyPassword(id: string): string {
@@ -99,6 +156,7 @@ export class Store {
   }
   account(id: string): ProviderAccount | undefined { return decode<ProviderAccount>(this.db.prepare('SELECT value FROM accounts WHERE id=?').get(id)); }
   saveAccount(account: ProviderAccount, secrets?: Record<string, string>): void {
+    if (this.historicalAccount(account.id)) throw new Error('已删除的供应商不能重新写入');
     const existing = this.account(account.id);
     if (existing) {
       this.db.prepare('UPDATE accounts SET value=? WHERE id=?').run(JSON.stringify(account), account.id);
@@ -126,6 +184,7 @@ export class Store {
     this.db.prepare('UPDATE accounts SET sync=? WHERE id=?').run(JSON.stringify({ ...this.syncState(id), error, lastAttemptAt: at }), id);
   }
   replaceCatalog(account: ProviderAccount, models: ProviderModel[], at: string): void {
+    if (!this.account(account.id)) throw new Error('供应商不存在，拒绝迟到的目录写回');
     const paths = new Set<string>();
     for (const model of models) {
       if (!model.path || model.path.startsWith('/') || paths.has(model.path)) throw new Error('模型目录存在空路径或重复路径');

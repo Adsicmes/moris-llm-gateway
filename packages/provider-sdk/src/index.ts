@@ -1,4 +1,6 @@
 import type { BillingType, Money, Price, Protocol, ProviderAccount, ProviderModel, ProviderMonitor, Usage } from '../../contracts/src/index.js';
+import type { ManagedResource, ManagedResourceInput } from '../../contracts/src/index.js';
+import { createHash } from 'node:crypto';
 export type * from '../../contracts/src/index.js';
 /** 插件声明的配置字段说明；只包含非秘密的展示元数据。 */
 export interface ProviderSecretField {
@@ -38,6 +40,9 @@ export interface ProviderContext {
   signal: AbortSignal;
   now: () => Date;
   updateSecrets: (patch: Record<string, string>) => Promise<void>;
+  /** 可选，以兼容旧插件及独立测试上下文；仅记录非秘密资源证据。 */
+  managedResources?: ManagedResource[];
+  recordResource?: (resource: ManagedResourceInput) => Promise<void>;
 }
 export interface Discovery {
   models: ProviderModel[];
@@ -62,6 +67,10 @@ export interface ProviderPlugin {
   name: string;
   /** 后台表单的插件专属默认值与字段说明。 */
   setup?: ProviderSetup;
+  cleanup?: {
+    preview(context: ProviderContext): Promise<Array<{ resource: ManagedResourceInput; verified: boolean; reason?: string }>>;
+    execute(context: ProviderContext, resource: ManagedResourceInput): Promise<{ state: 'deleted' | 'absent' | 'failed' | 'unknown'; message?: string }>;
+  };
   discover(context: ProviderContext): Promise<Discovery>;
   prepare(context: ProviderContext, model: ProviderModel, body: Record<string, unknown>, protocol: Protocol): Promise<PreparedRequest>;
   monitor?(context: ProviderContext): Promise<ProviderMonitor>;
@@ -74,6 +83,10 @@ export interface ProviderPlugin {
     /** 只读取已保存的非秘密授权状态，用于刷新后的状态回显。 */
     status?(context: ProviderContext): Promise<AuthorizationStatus>;
   };
+}
+/** New API 令牌前缀 sk- 可能由平台展示层添加；摘要不可用于推理。 */
+export function credentialFingerprint(value: string): string {
+  return createHash('sha256').update(value.replace(/^sk-/, '')).digest('hex');
 }
 export interface DeviceAuthorization {
   deviceAuthId: string;
