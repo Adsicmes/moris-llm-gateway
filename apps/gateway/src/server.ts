@@ -13,6 +13,8 @@ import { executeRequest, GatewayError } from './routing.js';
 import { modelParametersSchema, resolveModelParameters } from './model-parameters.js';
 import { sumMoney } from './billing.js';
 import type { DeviceAuthorization } from '../../../packages/provider-sdk/src/index.js';
+import { proxyFailure, proxyInputSchema, proxyUrl as profileProxyUrl } from './proxy.js';
+import type { ProxyProfile, ProxyView, ProxyDiagnostic } from '../../../packages/contracts/src/index.js';
 
 const urlSchema = z.string().url().refine(v => ['http:', 'https:'].includes(new URL(v).protocol) && !new URL(v).username && !new URL(v).password, '需要不含凭据的HTTP(S)地址');
 const proxySchema = z.string().refine(v => { try { return v === '' || ['http:', 'https:', 'socks5:', 'socks5h:'].includes(new URL(v).protocol); } catch { return false; } }, '代理URL无效');
@@ -21,7 +23,7 @@ const accountSchema = z.object({
   namespace: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/), name: z.string().min(1).max(100),
   plugin: z.string().min(1).max(100), baseUrl: urlSchema,
   billingType: z.enum(['subscription', 'metered']), enabled: z.boolean().default(true),
-  proxyUrl: proxySchema.optional(), autoCreateTokens: z.boolean().default(false), tokenTemplate: tokenTemplate.optional(),
+  proxyUrl: proxySchema.optional(), proxyId: z.string().min(1).nullable().optional(), autoCreateTokens: z.boolean().default(false), tokenTemplate: tokenTemplate.optional(),
   options: z.record(z.string(), z.unknown()).default({}), secrets: z.record(z.string(), z.string()).optional(),
 }).strict();
 const billSchema = z.object({ accountId: z.string(), paidAt: z.iso.datetime({ offset: true }), amountCny: z.number().finite().min(-1e10).max(1e10).refine(x => Math.abs(x * 100 - Math.round(x * 100)) < 0.00001, '人民币金额最多两位小数'), period: z.string().max(100).optional(), method: z.string().max(100).optional(), note: z.string().max(2000).optional() }).strict();
@@ -104,9 +106,69 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   app.get('/api/auth/session', async req => store.session(req.cookies.moris_session!));
   app.post('/api/auth/logout', async (req, reply) => { store.deleteSession(req.cookies.moris_session!); reply.clearCookie('moris_session', { path: '/' }); return { ok: true }; });
   app.get('/api/admin/plugins', async () => ({ items: options.registry.list() }));
+  const proxyView = (profile: ProxyProfile): ProxyView => ({ ...profile, references: store.proxyReferences(profile.id) });
+  const requireProxy = (id: string): ProxyProfile => {
+    const profile = store.proxy(id);
+    if (!profile) throw new GatewayError('not_found', '代理档案不存在', 404);
+    return profile;
+  };
+  const validateBinding = (data: { proxyId?: string | null; proxyUrl?: string; secrets?: Record<string, string> }) => {
+    if (data.proxyId !== undefined && data.proxyUrl !== undefined) throw new GatewayError('proxy_conflict', '不能同时设置代理档案和内联代理');
+    if (data.proxyId) requireProxy(data.proxyId);
+    if (data.secrets && '__proxyUrl' in data.secrets) throw new GatewayError('proxy_reserved', '请通过代理字段管理网络代理');
+  };
+  app.get('/api/admin/proxies', async () => ({ items: store.proxies().map(proxyView) }));
+  const writeProxy = (body: unknown, old?: ProxyProfile): ProxyProfile => {
+    const data = proxyInputSchema.parse(body);
+    const password = data.passwordAction === 'replace' ? data.password! : data.passwordAction === 'clear' ? '' : old ? store.proxyPassword(old.id) : '';
+    if (data.protocol.startsWith('socks') && (Boolean(data.username) !== Boolean(password) || Buffer.byteLength(password) > 255)) throw new GatewayError('proxy_auth', 'SOCKS5 认证需要同时填写用户名和密码（各不超过 255 字节），或同时清除');
+    const now = new Date().toISOString();
+    const profile: ProxyProfile = { id: old?.id ?? randomUUID(), name: data.name, protocol: data.protocol, host: data.host, port: data.port,
+      username: data.username, hasPassword: Boolean(password), createdAt: old?.createdAt ?? now, updatedAt: now };
+    store.saveProxy(profile, password);
+    return profile;
+  };
+  app.post('/api/admin/proxies', async req => ({ item: proxyView(writeProxy(req.body)) }));
+  app.patch('/api/admin/proxies/:id', async req => {
+    const old = requireProxy(idParam(req));
+    const references = store.proxyReferences(old.id);
+    if (references.some(account => startingAuthorization.has(account.id) || authorizations.get(account.id)?.busy)) throw new GatewayError('oauth_busy', '引用此代理的供应商正在执行授权请求，请稍后再保存', 409);
+    const oldUrl = profileProxyUrl(old, store.proxyPassword(old.id));
+    const profile = writeProxy(req.body, old);
+    for (const account of references) authorizations.delete(account.id);
+    void transport.retire(oldUrl).catch(() => {});
+    return { item: proxyView(profile) };
+  });
+  app.delete('/api/admin/proxies/:id', async req => {
+    const profile = requireProxy(idParam(req));
+    if (store.proxyReferences(profile.id).length) throw new GatewayError('proxy_in_use', '请先将引用此档案的供应商切换到其他代理或直连', 409);
+    const oldUrl = profileProxyUrl(profile, store.proxyPassword(profile.id));
+    store.deleteProxy(profile.id);
+    void transport.retire(oldUrl).catch(() => {});
+    return { ok: true };
+  });
+  const diagnosing = new Set<string>();
+  app.post('/api/admin/proxies/:id/diagnose', async req => {
+    const profile = requireProxy(idParam(req));
+    const { target } = z.object({ target: z.enum(['cloudflare', 'openai']) }).strict().parse(req.body);
+    if (diagnosing.has(profile.id)) throw new GatewayError('proxy_busy', '此代理正在探测，请稍后重试', 409);
+    diagnosing.add(profile.id);
+    const probe = new Transport();
+    try {
+      const fetcher = options.fetch ?? probe.fetch(profileProxyUrl(profile, store.proxyPassword(profile.id)), Math.min(store.settings().connectTimeoutMs, 10000));
+      const response = await fetcher(target === 'openai' ? 'https://api.openai.com/v1/models' : 'https://www.cloudflare.com/cdn-cgi/trace', { method: 'HEAD', redirect: 'error', signal: AbortSignal.timeout(10000) });
+      await response.body?.cancel();
+      const result: ProxyDiagnostic = response.status === 407 ? { ok: false, code: 'proxy_auth', message: '代理认证失败，请检查用户名和密码。', status: response.status }
+        : response.status >= 400 ? { ok: false, code: 'upstream_rejected', message: '已收到目标站点响应，但目标拒绝了未认证探测；这不代表账号授权或推理可用。', status: response.status }
+        : { ok: true, code: 'reachable', message: '已收到目标站点响应；这不代表账号授权或推理可用。', status: response.status };
+      return result;
+    } catch (error) { return proxyFailure(error); }
+    finally { diagnosing.delete(profile.id); await probe.close(); }
+  });
   app.get('/api/admin/providers', async () => ({ items: store.accounts() }));
   app.post('/api/admin/providers', async req => {
     const data = accountSchema.parse(req.body);
+    validateBinding(data);
     if (!options.registry.list().some(p => p.id === data.plugin)) throw new GatewayError('plugin_missing', '供应商插件未安装');
     if (store.accounts().some(a => a.namespace === data.namespace)) throw new GatewayError('namespace_exists', '供应商标识已存在', 409);
     const { secrets, proxyUrl, ...fields } = data;
@@ -117,9 +179,12 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   app.patch('/api/admin/providers/:id', async req => {
     const id = idParam(req); const old = requireAccount(store, id);
     const data = accountSchema.omit({ namespace: true, plugin: true }).partial().parse(req.body);
+    validateBinding(data);
     const { secrets, proxyUrl, ...fields } = data;
     const account: ProviderAccount = { ...old, ...fields, updatedAt: new Date().toISOString(), ...(proxyUrl !== undefined ? { proxyUrl: publicProxy(proxyUrl) } : {}) };
-    store.saveAccount(account, { ...secrets, ...(proxyUrl !== undefined ? { __proxyUrl: proxyUrl } : {}) });
+    if (proxyUrl !== undefined && data.proxyId === undefined) delete account.proxyId;
+    if (data.proxyId !== undefined) delete account.proxyUrl;
+    store.saveAccount(account, { ...secrets, ...(proxyUrl !== undefined ? { __proxyUrl: proxyUrl } : {}), ...(data.proxyId !== undefined ? { __proxyUrl: '' } : {}) });
     return { item: account };
   });
   app.delete('/api/admin/providers/:id', async req => { const account = requireAccount(store, idParam(req)); store.saveAccount({ ...account, enabled: false, updatedAt: new Date().toISOString() }); return { ok: true }; });

@@ -9,6 +9,7 @@ import { createApp } from '../apps/gateway/src/server.js';
 import { Store } from '../apps/gateway/src/store.js';
 import { ProviderRegistry } from '../apps/gateway/src/providers.js';
 import { Transport } from '../apps/gateway/src/network.js';
+import { proxyFailure } from '../apps/gateway/src/proxy.js';
 import type { ProviderAccount, ProviderModel } from '../packages/contracts/src/index.js';
 
 const key = () => randomBytes(32).toString('base64');
@@ -58,8 +59,8 @@ interface SocksStub {
   sockets: Set<net.Socket>;
 }
 
-/** 最小 SOCKS5 服务端：只支持无认证 CONNECT，用于验证 Transport 的本地代理路径。 */
-function createSocksStub(): SocksStub {
+/** 最小 SOCKS5 服务端，支持无认证和用户名密码握手。 */
+function createSocksStub(auth?: { username: string; password: string }): SocksStub {
   const targets: string[] = [];
   const sockets = new Set<net.Socket>();
   const server = net.createServer((client) => {
@@ -67,7 +68,7 @@ function createSocksStub(): SocksStub {
     client.on('close', () => sockets.delete(client));
 
     let buffer = Buffer.alloc(0);
-    let stage: 'greeting' | 'request' = 'greeting';
+    let stage: 'greeting' | 'auth' | 'request' = 'greeting';
 
     const onData = (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
@@ -78,8 +79,20 @@ function createSocksStub(): SocksStub {
         const methods = buffer[1]!;
         if (buffer.length < 2 + methods) return;
         buffer = buffer.subarray(2 + methods);
-        client.write(Buffer.from([5, 0]));
-        stage = 'request';
+        client.write(Buffer.from([5, auth ? 2 : 0]));
+        stage = auth ? 'auth' : 'request';
+      }
+
+      if (stage === 'auth') {
+        if (buffer.length < 2) return;
+        const usernameLength = buffer[1]!;
+        if (buffer.length < 3 + usernameLength) return;
+        const passwordLength = buffer[2 + usernameLength]!;
+        if (buffer.length < 3 + usernameLength + passwordLength) return;
+        const valid = buffer.subarray(2, 2 + usernameLength).toString() === auth?.username && buffer.subarray(3 + usernameLength, 3 + usernameLength + passwordLength).toString() === auth?.password;
+        client.write(Buffer.from([1, valid ? 0 : 1]));
+        if (!valid) return;
+        buffer = buffer.subarray(3 + usernameLength + passwordLength); stage = 'request';
       }
 
       if (buffer.length < 5) return;
@@ -275,7 +288,7 @@ test('Transport 直连请求可被 AbortSignal 中止', { timeout: 10_000 }, asy
   }
 });
 
-test('HTTP 代理通过 CONNECT 隧道转发本机请求', { timeout: 10_000 }, async () => {
+for (const authenticated of [false, true]) test(`HTTP CONNECT 转发（认证：${authenticated}）`, { timeout: 10_000 }, async () => {
   const targetSockets = new Set<net.Socket>();
   const target = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -298,6 +311,7 @@ test('HTTP 代理通过 CONNECT 隧道转发本机请求', { timeout: 10_000 }, 
     socket.on('close', () => proxySockets.delete(socket));
   });
   proxy.on('connect', (req, clientSocket, head) => {
+    if (authenticated && req.headers['proxy-authorization'] !== `Basic ${Buffer.from('user@name:p@ss#%:/中文').toString('base64')}`) { clientSocket.end('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n'); return; }
     connects.push(String(req.url));
     const [host, rawPort] = String(req.url).split(':');
     const upstream = net.connect(Number(rawPort), host, () => {
@@ -315,7 +329,8 @@ test('HTTP 代理通过 CONNECT 隧道转发本机请求', { timeout: 10_000 }, 
 
   const transport = new Transport();
   try {
-    const fetcher = transport.fetch(`http://127.0.0.1:${proxyPort}`, 2000);
+    if (authenticated) await assert.rejects(transport.fetch(`http://wrong:password@127.0.0.1:${proxyPort}`, 2000)(`http://127.0.0.1:${targetPort}/hello`), error => proxyFailure(error).code === 'proxy_auth');
+    const fetcher = transport.fetch(`http://${authenticated ? `${encodeURIComponent('user@name')}:${encodeURIComponent('p@ss#%:/中文')}@` : ''}127.0.0.1:${proxyPort}`, 2000);
     const response = await fetcher(`http://127.0.0.1:${targetPort}/hello`);
     assert.equal(response.status, 200);
     assert.equal(await response.text(), 'proxy-ok');
@@ -327,7 +342,7 @@ test('HTTP 代理通过 CONNECT 隧道转发本机请求', { timeout: 10_000 }, 
   }
 });
 
-test('SOCKS5 代理可建立 CONNECT 并转发本机请求', { timeout: 10_000 }, async () => {
+for (const authenticated of [false, true]) test(`SOCKS5 CONNECT 转发（认证：${authenticated}）`, { timeout: 10_000 }, async () => {
   const targetSockets = new Set<net.Socket>();
   const target = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -339,12 +354,13 @@ test('SOCKS5 代理可建立 CONNECT 并转发本机请求', { timeout: 10_000 }
   });
   const targetPort = await listen(target);
 
-  const stub = createSocksStub();
+  const stub = createSocksStub(authenticated ? { username: 'user@name', password: 'p@ss#%:/中文' } : undefined);
   const proxyPort = await listen(stub.server);
   const transport = new Transport();
 
   try {
-    const fetcher = transport.fetch(`socks5://127.0.0.1:${proxyPort}`, 2000);
+    if (authenticated) await assert.rejects(transport.fetch(`socks5://wrong:password@127.0.0.1:${proxyPort}`, 2000)(`http://127.0.0.1:${targetPort}/hello`), error => proxyFailure(error).code === 'proxy_auth');
+    const fetcher = transport.fetch(`socks5://${authenticated ? `${encodeURIComponent('user@name')}:${encodeURIComponent('p@ss#%:/中文')}@` : ''}127.0.0.1:${proxyPort}`, 2000);
     const response = await fetcher(`http://127.0.0.1:${targetPort}/over-socks`);
     assert.equal(response.status, 200);
     assert.equal(await response.text(), 'socks-ok');

@@ -5,6 +5,7 @@ import { describeError } from '../lib/api';
 import { formatDateTime } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 import { Link } from '../router';
+import type { ProxyView } from '../lib/contracts';
 import {
   Badge,
   Button,
@@ -37,6 +38,7 @@ export function ProvidersPage() {
   const toast = useToast();
   const providers = useAsync((signal) => api<ProvidersResponse>('/api/admin/providers', { signal }), []);
   const plugins = useAsync((signal) => api<PluginsResponse>('/api/admin/plugins', { signal }), []);
+  const proxies = useAsync(signal => api<{ items: ProxyView[] }>('/api/admin/proxies', { signal }), []);
   const [syncState, setSyncState] = useState<Record<string, SyncFeedback>>({});
   const [disableTarget, setDisableTarget] = useState<{ id: string; name: string } | null>(null);
   const [disabling, setDisabling] = useState(false);
@@ -156,7 +158,7 @@ export function ProvidersPage() {
                           <div className="cell-stack">
                             <span className="mono small break">{provider.baseUrl}</span>
                             <span className="small muted break">
-                              {provider.proxyUrl ? `代理 ${provider.proxyUrl}` : '直连'}
+                              {provider.proxyId ? `代理：${proxies.data?.items.find(item => item.id === provider.proxyId)?.name ?? '档案待读取或缺失'}` : provider.proxyId === null ? '直连' : provider.proxyUrl ? `旧代理 ${provider.proxyUrl}` : '直连'}
                             </span>
                           </div>
                         </td>

@@ -4,6 +4,7 @@ import { confirmNavigation } from './lib/navigation-guard';
 export type Route =
   | { name: 'overview' }
   | { name: 'providers' }
+  | { name: 'proxies' }
   | { name: 'provider-new' }
   | { name: 'provider-edit'; id: string }
   | { name: 'models' }
@@ -21,6 +22,7 @@ export function parseRoute(hash: string): Route {
   if (path === '/') return { name: 'overview' };
   if (path === '/login') return { name: 'login' };
   if (path === '/providers') return { name: 'providers' };
+  if (path === '/proxies') return { name: 'proxies' };
   if (path === '/providers/new') return { name: 'provider-new' };
   const providerMatch = /^\/providers\/([^/]+)\/edit$/.exec(path);
   if (providerMatch?.[1]) return { name: 'provider-edit', id: decodeURIComponent(providerMatch[1]) };
@@ -41,6 +43,8 @@ export function routeHref(route: Route): string {
       return '#/';
     case 'providers':
       return '#/providers';
+    case 'proxies':
+      return '#/proxies';
     case 'provider-new':
       return '#/providers/new';
     case 'provider-edit':

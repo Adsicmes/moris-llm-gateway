@@ -11,7 +11,7 @@
 - `GET /api/admin/overview` → `{accounts,models,requests,attempts,paidCny,estimatedUsd,settledUsd,equivalentUsd,unknownAttempts}`，请求费用按北京时间当日统计，实付为全量净额，费用字段不相加。
 - `GET /api/admin/providers` → `{items: ProviderAccount[]}`（绝不返回secrets，proxyUrl中的认证信息不回传）。
 - `GET /api/admin/plugins` → `{items:[{id,name}]}`。
-- `POST /api/admin/providers` → `{item}`。输入 `{namespace,name,plugin,baseUrl,billingType,enabled?,proxyUrl?,autoCreateTokens?,tokenTemplate?,options?,secrets?}`。
+- `POST /api/admin/providers` → `{item}`。输入 `{namespace,name,plugin,baseUrl,billingType,enabled?,proxyUrl?,proxyId?,autoCreateTokens?,tokenTemplate?,options?,secrets?}`。
 - `PATCH /api/admin/providers/:id` → `{item}`。字段同上但namespace/plugin不可变；secrets按键更新，空字符串删除该键。省略secrets/proxyUrl保留原值。
 - `DELETE /api/admin/providers/:id` → `{ok:true}`。软停用，保留历史。
 - `POST /api/admin/providers/:id/sync` → `{ok,state,error?}`。触发完整目录和额度刷新，失败保留旧快照。
@@ -38,3 +38,13 @@
 - `POST /v1/chat/completions`、`/v1/responses`、`/v1/messages`：body.model为业务ID（不含moris/），协议与模型不匹配返回400；同协议转发。
 
 错误统一 `{error:{code,message}}`（不含上游原始正文）。前端遇到401回登录，403展示权限/CSRF错误。分页limit默认50最大200。服务端仅单实例。
+
+## 轻量代理配置
+
+- `GET /api/admin/proxies` → `{items: ProxyView[]}`；含协议、主机、端口、用户名、`hasPassword` 和引用供应商 `{id,name}[]`，绝不返回密码。
+- `POST /api/admin/proxies`、`PATCH /api/admin/proxies/:id` → `{item: ProxyView}`；完整表单 `{name,protocol,host,port,username,passwordAction,password?}`。协议支持 `http/https/socks5/socks5h`；主机不含协议、端口、认证，IPv6 使用方括号。
+- `passwordAction` 必须明确指定：`keep` 保留已保存密码（新增时为不设密码），`replace` 必须带非空 `password`，`clear` 清除。`keep/clear` 不接受 password；密码加密保存，地址编辑不会隐式清除。用户名传空串清除；SOCKS5 认证用户名密码须同时存在或同时清除，各最多 255 字节。无需调用方手工编码认证。
+- `DELETE /api/admin/proxies/:id` → `{ok:true}`；被任何供应商引用（包括已停用）返回 `409 proxy_in_use`，须先解绑。
+- 供应商 `proxyId` 为档案 ID 时绑定；`null` 为显式直连；不提交则保留旧配置。不得与 `proxyUrl` 同时提交。选档案／直连会清理原内联 URL 及其认证；未切换的旧内联代理继续原样生效。`secrets.__proxyUrl` 为保留键，不能通过通用秘密接口写入。绑定缺失时拒绝，不降级直连。
+- `POST /api/admin/proxies/:id/diagnose` `{target:"cloudflare"|"openai"}` → `ProxyDiagnostic`。固定 HTTPS 站点 HEAD，无上游令牌／Cookie／推理；最长 10 秒，无重定向及重试。同档案探测不并发。状态分 `reachable/upstream_rejected/proxy_auth/connection_failed/timeout`，只返回固定文案和可选 HTTP 状态，不回传底层异常、凭据或响应正文。OpenAI 未认证探测返回 401 属目标拒绝，不能据此声称授权或推理可用。
+- 档案修改影响所有引用账号的后续请求，释放旧连接池但不重放正在执行的请求；未完成的设备授权会失效，正在执行授权 HTTP 请求时返回 `409 oauth_busy`，避免授权中途换出口。不做代理池、自动切换或负载均衡；真实认证出口仍需在部署环境验证。

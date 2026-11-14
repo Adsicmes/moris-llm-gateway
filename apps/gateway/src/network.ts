@@ -24,7 +24,7 @@ export class Transport {
             const done: buildConnector.Callback = (...args) => { if (!called) { called = true; callback(...args); } };
             void SocksClient.createConnection({
               command: 'connect', timeout: connectTimeoutMs,
-              proxy: { host: proxy.hostname, port: Number(proxy.port || 1080), type: 5, userId: decodeURIComponent(proxy.username), password: decodeURIComponent(proxy.password) },
+              proxy: { host: proxy.hostname.replace(/^\[|\]$/g, ''), port: Number(proxy.port || 1080), type: 5, userId: decodeURIComponent(proxy.username), password: decodeURIComponent(proxy.password) },
               destination: { host: options.hostname, port: Number(options.port || (options.protocol === 'https:' ? 443 : 80)) },
             }).then(({ socket }) => {
               if (options.protocol !== 'https:') { done(null, socket); return; }
@@ -32,7 +32,9 @@ export class Transport {
               const timeout = setTimeout(() => { tls.destroy(); done(new Error('TLS连接超时'), null); }, connectTimeoutMs);
               tls.once('secureConnect', () => { clearTimeout(timeout); done(null, tls); });
               tls.once('error', error => { clearTimeout(timeout); done(error, null); });
-            }).catch(() => done(new Error('SOCKS5代理连接失败'), null));
+            }).catch((error: unknown) => done(Object.assign(new Error('SOCKS5代理连接失败'), {
+              code: error instanceof Error && /authentication|accepted auth/i.test(error.message) ? 'PROXY_AUTH' : 'PROXY_CONNECT',
+            }), null));
           };
           dispatcher = new Agent({ connect: connector, headersTimeout: 0, bodyTimeout: 0 });
         } else throw new Error('代理仅支持HTTP、HTTPS或SOCKS5');
@@ -48,4 +50,12 @@ export class Transport {
     }) as typeof globalThis.fetch;
   }
   async close(): Promise<void> { await Promise.all([...this.dispatchers.values()].map(d => d.close())); this.dispatchers.clear(); }
+  /** 密码轮换或档案删除时释放旧池；已在执行的请求允许自然完成。 */
+  async retire(proxyUrl: string): Promise<void> {
+    const retired: Dispatcher[] = [];
+    for (const [key, dispatcher] of this.dispatchers) if (key.startsWith(`${proxyUrl}|`)) {
+      this.dispatchers.delete(key); retired.push(dispatcher);
+    }
+    await Promise.all(retired.map(dispatcher => dispatcher.close()));
+  }
 }

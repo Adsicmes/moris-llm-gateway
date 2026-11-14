@@ -3,6 +3,7 @@ import type { CatalogModel, CatalogResponse, ProviderAccount, ProviderMonitor, Q
 import { Store } from './store.js';
 import { Transport } from './network.js';
 import { estimateWindow, settle } from './billing.js';
+import { accountProxy } from './proxy.js';
 
 export class ProviderRegistry {
   private plugins = new Map<string, ProviderPlugin>();
@@ -26,7 +27,7 @@ export class Providers {
   constructor(readonly store: Store, readonly registry: ProviderRegistry, readonly transport: Transport, private fetchOverride?: typeof fetch) {}
   context(account: ProviderAccount, signal: AbortSignal): ProviderContext {
     const secrets = this.store.secrets(account.id);
-    const actualProxy = secrets.__proxyUrl ?? account.proxyUrl;
+    const actualProxy = accountProxy(this.store, account);
     return {
       account, secrets, signal, now: () => new Date(),
       fetch: (async (input, init) => (this.fetchOverride ?? this.transport.fetch(actualProxy, this.store.settings().connectTimeoutMs))(input, { ...init, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal })) as typeof fetch,

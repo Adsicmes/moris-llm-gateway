@@ -8,7 +8,7 @@ import type {
   ProvidersResponse,
   SyncResult,
 } from '../types';
-import type { BillingType, TokenTemplate } from '../lib/contracts';
+import type { BillingType, TokenTemplate, ProxyView } from '../lib/contracts';
 import { describeError } from '../lib/api';
 import { prettyJson, formatDateTime } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -74,6 +74,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     [mode],
   );
   const plugins = useAsync((signal) => api<PluginsResponse>('/api/admin/plugins', { signal }), []);
+  const proxies = useAsync(signal => api<{ items: ProxyView[] }>('/api/admin/proxies', { signal }), []);
 
   const [namespace, setNamespace] = useState('');
   const [name, setName] = useState('');
@@ -82,6 +83,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
   const [billingType, setBillingType] = useState<BillingType>('metered');
   const [enabled, setEnabled] = useState(true);
   const [proxyUrl, setProxyUrl] = useState('');
+  const [proxySelection, setProxySelection] = useState('');
   const [autoCreateTokens, setAutoCreateTokens] = useState(false);
   const [token, setToken] = useState<TokenDraft>(EMPTY_TOKEN);
   const [optionsText, setOptionsText] = useState('{}');
@@ -108,6 +110,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
           billingType: 'metered',
           enabled: true,
           proxyUrl: '',
+          proxySelection: '',
           autoCreateTokens: false,
           token: EMPTY_TOKEN,
           optionsText: '{}',
@@ -126,12 +129,13 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         billingType,
         enabled,
         proxyUrl,
+        proxySelection,
         autoCreateTokens,
         token,
         optionsText,
         secrets: secretRows,
       }),
-    [namespace, name, plugin, baseUrl, billingType, enabled, proxyUrl, autoCreateTokens, token, optionsText, secretRows],
+    [namespace, name, plugin, baseUrl, billingType, enabled, proxyUrl, proxySelection, autoCreateTokens, token, optionsText, secretRows],
   );
   const dirty = baseline !== null && snapshot !== baseline;
   const { allowNavigation } = useUnsavedChanges(dirty && !busy);
@@ -153,6 +157,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     setBillingType(found.billingType);
     setEnabled(found.enabled);
     setProxyUrl(found.proxyUrl ?? '');
+    setProxySelection(found.proxyId ?? (found.proxyId === undefined && found.proxyUrl ? '__legacy' : ''));
     setAutoCreateTokens(found.autoCreateTokens);
     const nextToken: TokenDraft = found.tokenTemplate
       ? {
@@ -175,6 +180,7 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
         billingType: found.billingType,
         enabled: found.enabled,
         proxyUrl: found.proxyUrl ?? '',
+        proxySelection: found.proxyId ?? (found.proxyId === undefined && found.proxyUrl ? '__legacy' : ''),
         autoCreateTokens: found.autoCreateTokens,
         token: nextToken,
         optionsText: nextOptions,
@@ -357,14 +363,8 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
     if (options.value) input.options = options.value;
     if (Object.keys(secrets).length > 0) input.secrets = secrets;
 
-    const trimmedProxy = proxyUrl.trim();
-    if (mode === 'new') {
-      if (trimmedProxy) input.proxyUrl = trimmedProxy;
-    } else if (trimmedProxy !== (original?.proxyUrl ?? '')) {
-      // 列表回显的 proxyUrl 已去掉认证信息。只有值确实变化时才提交；
-      // 未改动时完全省略该字段，服务端才能保留原有代理认证。
-      input.proxyUrl = trimmedProxy;
-    }
+    // 旧配置不提交任何代理字段，确保原有认证原样保留。
+    if (proxySelection !== '__legacy') input.proxyId = proxySelection || null;
 
     return { input };
   };
@@ -590,27 +590,27 @@ export function ProviderEditPage({ mode, id }: { mode: Mode; id?: string }) {
                   error={errors.proxyUrl}
                   hint={
                     <>
-                      例：<code>http://host.docker.internal:7890</code> 或{' '}
-                      <code>socks5h://host.docker.internal:7891</code>。容器里的{' '}
-                      <code>127.0.0.1</code> 指向网关容器自身；要连宿主代理请用{' '}
-                      <code>host.docker.internal:端口</code>（compose 已配置 host-gateway）或宿主内网 IP。
-                      <br />
-                      先保存代理再发起设备授权：授权、目录同步和推理都会走同一代理。代理用户名密码只保存在服务端，不会回传；
-                      {mode === 'edit' ? '留空并保存会移除代理，未改动时保持原值。' : '留空表示直连。'}
+                      在<Link to={{ name: 'proxies' }}>代理配置</Link>中管理地址和认证，再在这里选择档案。先保存供应商，再发起授权；授权、同步和推理使用同一代理，不自动切换。
+                      {proxySelection === '__legacy' ? ` 当前保留旧代理 ${proxyUrl}；切换并保存后会移除旧内联配置。` : ''}
+                      {proxies.error ? ' 代理档案读取失败，请重试；当前选择不会被清除。' : ''}
                     </>
                   }
                   className="field--wide"
                 >
-                  <Input
+                  <Select
                     id="provider-proxy"
-                    value={proxyUrl}
-                    onChange={(event) => setProxyUrl(event.target.value)}
-                    placeholder="http://host.docker.internal:7890"
-                    className="mono"
+                    value={proxySelection}
+                    onChange={(event) => setProxySelection(event.target.value)}
                     aria-invalid={Boolean(errors.proxyUrl)}
                     aria-describedby={errors.proxyUrl ? 'provider-proxy-error' : undefined}
-                  />
+                  >
+                    <option value="">直连</option>
+                    {original?.proxyId === undefined && original?.proxyUrl ? <option value="__legacy">保留旧内联代理</option> : null}
+                    {proxySelection && proxySelection !== '__legacy' && !proxies.data?.items.some(item => item.id === proxySelection) ? <option value={proxySelection}>当前代理档案（加载中或已缺失）</option> : null}
+                    {proxies.data?.items.map(item => <option key={item.id} value={item.id}>{item.name} · {item.protocol}://{item.host}:{item.port}</option>)}
+                  </Select>
                 </Field>
+                {proxies.error ? <Button type="button" onClick={proxies.reload}>重新读取代理档案</Button> : null}
               </FormGrid>
 
               {pluginList.length === 0 && !plugins.error ? (

@@ -89,6 +89,7 @@ export interface ProviderInput {
   billingType: BillingType;
   enabled?: boolean;
   proxyUrl?: string;
+  proxyId?: string | null;
   autoCreateTokens?: boolean;
   tokenTemplate?: TokenTemplate;
   options?: Record<string, unknown>;

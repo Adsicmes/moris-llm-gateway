@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { DEFAULT_SETTINGS, type CatalogModel, type ModelParameterOverrides, type ModelParameterState, type Money, type Price, type ProviderAccount, type ProviderModel, type ProviderMonitor, type Settings, type Usage } from '../../../packages/contracts/src/index.js';
 import { resolveModelParameters } from './model-parameters.js';
 import { hashSecret, newSecret, passwordHash, Vault } from './security.js';
+import type { ProxyProfile } from '../../../packages/contracts/src/index.js';
 
 export interface RequestRecord {
   id: string; modelId: string; deviceId: string; startedAt: string; finishedAt: string | null;
@@ -38,6 +39,7 @@ export class Store {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, namespace TEXT UNIQUE NOT NULL, value TEXT NOT NULL, secrets TEXT NOT NULL, sync TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS proxies (id TEXT PRIMARY KEY, value TEXT NOT NULL, secrets TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS models (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), value TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS models_account ON models(account_id);
       CREATE TABLE IF NOT EXISTS monitors (account_id TEXT PRIMARY KEY REFERENCES accounts(id), value TEXT NOT NULL);
@@ -77,6 +79,24 @@ export class Store {
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   accounts(): ProviderAccount[] { return this.db.prepare('SELECT value FROM accounts ORDER BY namespace').all().map(row => decode<ProviderAccount>(row)!); }
+  proxies(): ProxyProfile[] { return this.db.prepare('SELECT value FROM proxies ORDER BY id').all().map(row => decode<ProxyProfile>(row)!); }
+  proxy(id: string): ProxyProfile | undefined { return decode<ProxyProfile>(this.db.prepare('SELECT value FROM proxies WHERE id=?').get(id)); }
+  proxyPassword(id: string): string {
+    const row = this.db.prepare('SELECT secrets FROM proxies WHERE id=?').get(id);
+    if (!row) throw new Error('代理档案不存在');
+    return this.vault.open<{ password: string }>(String(row.secrets)).password;
+  }
+  saveProxy(profile: ProxyProfile, password: string): void {
+    this.db.prepare('INSERT INTO proxies VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, secrets=excluded.secrets')
+      .run(profile.id, JSON.stringify(profile), this.vault.seal({ password }));
+  }
+  proxyReferences(id: string): Array<{ id: string; name: string }> {
+    return this.accounts().filter(account => account.proxyId === id).map(({ id, name }) => ({ id, name }));
+  }
+  deleteProxy(id: string): void {
+    if (this.proxyReferences(id).length) throw new Error('代理档案仍被供应商引用');
+    this.db.prepare('DELETE FROM proxies WHERE id=?').run(id);
+  }
   account(id: string): ProviderAccount | undefined { return decode<ProviderAccount>(this.db.prepare('SELECT value FROM accounts WHERE id=?').get(id)); }
   saveAccount(account: ProviderAccount, secrets?: Record<string, string>): void {
     const existing = this.account(account.id);

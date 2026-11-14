@@ -20,6 +20,7 @@ interface FakeState {
   pollResult: AuthorizationResult;
   statusResult: { authorized: boolean; accountId?: string; planType?: string; email?: string; expiresAt?: string };
   onPoll?: (context: ProviderContext) => Promise<void> | void;
+  onStart?: (context: ProviderContext) => Promise<void> | void;
 }
 
 async function fixture() {
@@ -53,8 +54,9 @@ async function fixture() {
     discover: async () => { throw new Error('测试不触发目录发现'); },
     prepare: async () => { throw new Error('测试不触发推理'); },
     authorization: {
-      start: async () => {
+      start: async (context) => {
         state.startCalls += 1;
+        if (state.onStart) await state.onStart(context);
         if (state.startError) throw state.startError;
         return { ...state.grant };
       },
@@ -111,6 +113,30 @@ test('设备密钥不能管理授权，start/poll 必须带 CSRF', async () => {
   } finally {
     await f.close();
   }
+});
+
+test('共用代理编辑不能打断执行中的授权 HTTP；保存后未完成授权须重开', async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let started!: () => void;
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  try {
+    const payload = { name: 'auth-proxy', protocol: 'http', host: 'localhost', port: 7890, username: '', passwordAction: 'keep' };
+    const profile = (await f.app.inject({ method: 'POST', url: '/api/admin/proxies', headers: f.first, payload })).json().item;
+    await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers: f.first, payload: { proxyId: profile.id } });
+    f.state.onStart = async () => { started(); await gate; };
+    const starting = f.app.inject({ method: 'POST', url: f.startUrl, headers: f.first });
+    const running = starting.then(response => response);
+    await entered;
+    const busy = await f.app.inject({ method: 'PATCH', url: `/api/admin/proxies/${profile.id}`, headers: f.first, payload: { ...payload, port: 7891 } });
+    assert.equal(busy.statusCode, 409); assert.equal(f.store.proxy(profile.id)?.port, 7890);
+    release(); assert.equal((await running).statusCode, 200);
+    const saved = await f.app.inject({ method: 'PATCH', url: `/api/admin/proxies/${profile.id}`, headers: f.first, payload: { ...payload, port: 7891 } });
+    assert.equal(saved.statusCode, 200);
+    const poll = await f.app.inject({ method: 'POST', url: f.pollUrl, headers: f.first });
+    assert.equal(poll.statusCode, 409); assert.equal(poll.json().error.code, 'oauth_missing'); assert.equal(f.state.pollCalls, 0);
+  } finally { release(); await f.close(); }
 });
 
 test('start 只返回展示信息，轮询间隔最少 1 秒', async () => {

@@ -23,6 +23,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { route: { name: 'models' }, label: '模型目录', icon: 'cube', match: (route) => route.name === 'models' },
       { route: { name: 'quota' }, label: '余额与额度', icon: 'chart', match: (route) => route.name === 'quota' },
+      { route: { name: 'proxies' }, label: '代理配置', icon: 'server', match: (route) => route.name === 'proxies' },
       {
         route: { name: 'providers' },
         label: '供应商',

@@ -10,7 +10,8 @@
 
 - 管理员密码登录、会话恢复、退出、401 回登录、CSRF 请求头。
 - 概览：账户/模型/请求/尝试计数，人民币实付、请求估算、已结算、API 等价四类金额分开展示。
-- 供应商：新增、编辑、密钥按键更新/删除、代理、自动令牌模板、JSON options、插件选择、同步、软停用。
+- 供应商：新增、编辑、密钥按键更新/删除、代理档案选择（兼容旧内联代理）、自动令牌模板、JSON options、插件选择、同步、软停用。
+- 代理配置：协议／主机／端口／认证拆分、密码保留／替换／清除、引用关系与删除保护、固定目标无推理连接诊断。
 - 模型目录：来源汇总、搜索与筛选、价格/参考价格、能力、限制、字段级来源、变体、目录同步时间、停用条目；详情内统一参数编辑。
 - 余额与额度：供应商余额、上游窗口、窗口估算、未知/过期/失败状态、单账户同步。
 - 请求：分页列表、生成级详情、attempt 级用量/费用/价格依据/原始元数据。
@@ -71,6 +72,7 @@ npm run typecheck --workspace=@moris/admin
 | `#/login` | 登录 | 未登录时任何路由都会显示登录页 |
 | `#/` | 概览 | 默认页 |
 | `#/providers` | 供应商列表 | 同步、编辑、软停用 |
+| `#/proxies` | 代理配置 | 新增、编辑、引用关系、删除保护、连接诊断 |
 | `#/providers/new` | 新增供应商 | 创建 |
 | `#/providers/:id/edit` | 编辑供应商 | 从列表数据中查找该 ID |
 | `#/models` | 模型目录 | 目录、参数编辑与详情弹窗 |
@@ -106,9 +108,10 @@ npm run typecheck --workspace=@moris/admin
 
 ### 5.3 供应商
 
-- `GET /api/admin/providers`、`GET /api/admin/plugins`。
-- 新建：`POST /api/admin/providers`，字段严格为 `namespace,name,plugin,baseUrl,billingType,enabled,proxyUrl,autoCreateTokens,tokenTemplate,options,secrets`。
-- 编辑：`PATCH /api/admin/providers/:id`；**不提交 `namespace` 与 `plugin`**（服务端将其视为不可变）。`proxyUrl` 仅在值与回显值不同时提交；清空并保存会发送空字符串以移除代理。未改动时完全省略该字段，避免擦除服务端保存的代理认证信息。
+- `GET /api/admin/providers`、`GET /api/admin/plugins`、`GET /api/admin/proxies`。
+- 新建：`POST /api/admin/providers`，字段为 `namespace,name,plugin,baseUrl,billingType,enabled,proxyId,autoCreateTokens,tokenTemplate,options,secrets`；旧 API 的内联 `proxyUrl` 仍兼容。
+- 编辑：`PATCH /api/admin/providers/:id`；**不提交 `namespace` 与 `plugin`**（服务端将其视为不可变）。代理选择提交 `proxyId`（`null` 为直连）；选择“保留旧内联代理”时完全省略代理字段，避免擦除原认证。档案读取失败或绑定缺失不会自动变成直连。
+- 代理页拆分主机、端口、用户名与密码；密码操作明确为保留／替换／清除。编辑共用档案显示受影响供应商及授权重开提醒；未保存关闭需确认，秘密草稿不持久化到浏览器。被引用档案禁止删除，显示解绑说明。诊断只探测已保存配置，结果标明实际目标站点；探测期间不可编辑同一档案。具体管理接口见 `docs/API.md`。
 - 密钥：列表绝不回显 secrets。新增/替换按 `{key: value}` 提交；勾选“删除”的键以 `{key: ""}` 提交。未填写的键不提交。
 - 自动令牌：默认关闭；模板完整（名称前缀、额度、0–3650 整数天有效期，0 表示长期有效）才提交。`unlimited` 可选，额度按 0 提交；不会猜测或隐式开启。
 - `options` 必须是 JSON 对象；无效 JSON 在客户端阻止提交。

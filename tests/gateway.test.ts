@@ -5,6 +5,7 @@ import { createApp } from '../apps/gateway/src/server.js';
 import { Store } from '../apps/gateway/src/store.js';
 import { ProviderRegistry } from '../apps/gateway/src/providers.js';
 import type { ProviderAccount, ProviderModel } from '../packages/contracts/src/index.js';
+import { accountProxy, proxyUrl } from '../apps/gateway/src/proxy.js';
 
 async function fixture(fetcher: typeof fetch) {
   const store = new Store(':memory:', randomBytes(32).toString('base64'));
@@ -30,6 +31,83 @@ async function fixture(fetcher: typeof fetch) {
   const app = await createApp({ store, registry, fetch: fetcher, secureCookie: false, background: false });
   return { app, store, headers: { authorization: `Bearer ${device.key}` }, close: async () => { await app.close(); store.close(); } };
 }
+test('代理档案密码加密、不回显、保留替换清除；绑定、旧配置兼容与引用删除保护', async () => {
+  const f = await fixture(fetch);
+  try {
+    const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'a-test-password-only' } });
+    const headers = { cookie: String(login.headers['set-cookie']).split(';')[0]!, 'x-csrf-token': login.json().csrfToken as string };
+    const payload = { name: '测试出口', protocol: 'http', host: 'localhost', port: 7890, username: 'user@name', passwordAction: 'replace', password: 'p@ss#word%:/中文' };
+    assert.equal((await f.app.inject({ url: '/api/admin/proxies', headers: f.headers })).statusCode, 401);
+    for (const method of ['POST', 'PATCH', 'DELETE'] as const) {
+      assert.equal((await f.app.inject({ method, url: '/api/admin/proxies' + (method === 'POST' ? '' : '/missing'), headers: { cookie: headers.cookie }, payload: method === 'DELETE' ? undefined : payload })).statusCode, 403);
+    }
+    const created = await f.app.inject({ method: 'POST', url: '/api/admin/proxies', headers, payload });
+    assert.equal(created.statusCode, 200, created.body);
+    assert.ok(!created.body.includes(payload.password));
+    const profile = created.json().item;
+    const encoded = new URL(proxyUrl(profile, payload.password));
+    assert.equal(decodeURIComponent(encoded.password), payload.password);
+    assert.equal(decodeURIComponent(encoded.username), payload.username);
+    const url = `/api/admin/proxies/${profile.id}`;
+    const encrypted = f.store.db.prepare('SELECT * FROM proxies WHERE id=?').get(profile.id);
+    assert.ok(!JSON.stringify(encrypted).includes(payload.password));
+    assert.equal(f.store.proxyPassword(profile.id), payload.password);
+    const { password: _, ...withoutPassword } = payload;
+    assert.equal((await f.app.inject({ method: 'PATCH', url, headers, payload: { ...withoutPassword, host: 'example.com', passwordAction: 'keep' } })).statusCode, 200);
+    assert.equal(f.store.proxyPassword(profile.id), payload.password);
+    assert.equal((await f.app.inject({ method: 'PATCH', url, headers, payload: { ...withoutPassword, passwordAction: 'replace', password: 'new-pass' } })).statusCode, 200);
+    assert.equal(f.store.proxyPassword(profile.id), 'new-pass');
+    // 旧内联认证配置在未选择新档案时仍可使用。
+    await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { proxyUrl: 'http://old:pass@localhost:9999' } });
+    assert.equal(accountProxy(f.store, f.store.account('a')!), 'http://old:pass@localhost:9999');
+    await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { name: '保留旧认证' } });
+    assert.match(accountProxy(f.store, f.store.account('a')!)!, /old:pass/);
+    assert.equal((await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { proxyId: profile.id } })).statusCode, 200);
+    const actual = new URL(accountProxy(f.store, f.store.account('a')!)!);
+    assert.equal(decodeURIComponent(actual.username), payload.username); assert.equal(decodeURIComponent(actual.password), 'new-pass');
+    assert.equal(f.store.secrets('a').__proxyUrl, undefined);
+    const list = await f.app.inject({ url: '/api/admin/proxies', headers });
+    assert.equal(list.json().items[0].references[0].id, 'a'); assert.ok(!list.body.includes('new-pass'));
+    assert.equal((await f.app.inject({ method: 'DELETE', url, headers })).statusCode, 409);
+    assert.equal((await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { proxyId: 'missing' } })).statusCode, 404);
+    assert.equal((await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { proxyId: null, proxyUrl: '' } })).statusCode, 400);
+    f.store.saveAccount({ ...f.store.account('a')!, proxyId: 'missing' });
+    assert.throws(() => accountProxy(f.store, f.store.account('a')!), /代理档案不存在/);
+    await f.app.inject({ method: 'PATCH', url: '/api/admin/providers/a', headers, payload: { proxyId: null } });
+    assert.equal(accountProxy(f.store, f.store.account('a')!), undefined);
+    await f.app.inject({ method: 'PATCH', url, headers, payload: { ...withoutPassword, username: '', passwordAction: 'clear' } });
+    assert.equal(f.store.proxyPassword(profile.id), ''); assert.equal(f.store.proxy(profile.id)?.hasPassword, false);
+    assert.equal((await f.app.inject({ method: 'DELETE', url, headers })).statusCode, 200);
+    for (const invalid of [{ host: 'user:pass@host' }, { host: 'https://host' }, { host: 'host:80' }, { port: 0 }, { port: 65536 }, { passwordAction: 'replace', password: '' }, { protocol: 'socks5', username: '' }]) {
+      assert.equal((await f.app.inject({ method: 'POST', url: '/api/admin/proxies', headers, payload: { ...payload, ...invalid } })).statusCode, 400, JSON.stringify(invalid));
+    }
+  } finally { await f.close(); }
+});
+
+test('代理诊断使用固定目标、HEAD且不带凭据；安全分类响应与错误', async () => {
+  let failure: unknown; let status = 200; let calls = 0;
+  const f = await fixture((async (url, init) => {
+    calls++; assert.equal(url, 'https://api.openai.com/v1/models'); assert.equal(init?.method, 'HEAD'); assert.equal(init?.headers, undefined);
+    if (failure) throw failure;
+    return new Response(null, { status });
+  }) as typeof fetch);
+  try {
+    const login = await f.app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'a-test-password-only' } });
+    const headers = { cookie: String(login.headers['set-cookie']).split(';')[0]!, 'x-csrf-token': login.json().csrfToken as string };
+    const created = await f.app.inject({ method: 'POST', url: '/api/admin/proxies', headers, payload: { name: 'probe', protocol: 'http', host: 'localhost', port: 7890, username: '', passwordAction: 'keep' } });
+    const url = `/api/admin/proxies/${created.json().item.id}/diagnose`;
+    assert.equal((await f.app.inject({ method: 'POST', url, headers, payload: { target: 'https://private.test' } })).statusCode, 400); assert.equal(calls, 0);
+    assert.equal((await f.app.inject({ method: 'POST', url, headers: { cookie: headers.cookie }, payload: { target: 'openai' } })).statusCode, 403);
+    for (const [value, code] of [[200, 'reachable'], [401, 'upstream_rejected'], [407, 'proxy_auth']] as const) {
+      status = value;
+      assert.equal((await f.app.inject({ method: 'POST', url, headers, payload: { target: 'openai' } })).json().code, code);
+    }
+    for (const [error, code] of [[new Error('http://private:secret@host', { cause: Object.assign(new Error('hidden'), { code: 'PROXY_AUTH' }) }), 'proxy_auth'], [new DOMException('hidden-secret', 'TimeoutError'), 'timeout'], [new Error('private:secret'), 'connection_failed']] as const) {
+      failure = error; const result = await f.app.inject({ method: 'POST', url, headers, payload: { target: 'openai' } });
+      assert.equal(result.json().code, code); assert.ok(!result.body.includes('secret'));
+    }
+  } finally { await f.close(); }
+});
 test('临时失败最多三次，每次费用留存，不透传设备密钥', async () => {
   let calls = 0;
   const f = await fixture((async (_url, init) => {

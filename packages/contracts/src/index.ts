@@ -72,6 +72,35 @@ export interface TokenTemplate {
   expiresInDays: number;
   unlimited?: boolean;
 }
+export interface ProxyProfile {
+  id: string;
+  name: string;
+  protocol: 'http' | 'https' | 'socks5' | 'socks5h';
+  host: string;
+  port: number;
+  username: string;
+  hasPassword: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ProxyInput {
+  name: string;
+  protocol: ProxyProfile['protocol'];
+  host: string;
+  port: number;
+  username: string;
+  passwordAction: 'keep' | 'replace' | 'clear';
+  password?: string;
+}
+export interface ProxyView extends ProxyProfile {
+  references: Array<{ id: string; name: string }>;
+}
+export interface ProxyDiagnostic {
+  ok: boolean;
+  code: 'reachable' | 'upstream_rejected' | 'proxy_auth' | 'connection_failed' | 'timeout';
+  message: string;
+  status?: number;
+}
 export interface ProviderAccount {
   id: string;
   namespace: string;
@@ -81,6 +110,8 @@ export interface ProviderAccount {
   billingType: BillingType;
   enabled: boolean;
   proxyUrl?: string;
+  /** null 为显式直连；undefined 保留旧内联代理行为。 */
+  proxyId?: string | null;
   autoCreateTokens: boolean;
   tokenTemplate?: TokenTemplate;
   options: Record<string, unknown>;

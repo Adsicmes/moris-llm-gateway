@@ -6,6 +6,7 @@ import { Button, Icon } from './ui';
 import { LoginPage } from './pages/Login';
 import { OverviewPage } from './pages/Overview';
 import { ProvidersPage } from './pages/Providers';
+import { ProxiesPage } from './pages/Proxies';
 import { ProviderEditPage } from './pages/ProviderEdit';
 import { ModelsPage } from './pages/Models';
 import { QuotaPage } from './pages/Quota';
@@ -18,6 +19,7 @@ import { SettingsPage } from './pages/Settings';
 const TITLES: Record<Route['name'], string> = {
   overview: '概览',
   providers: '供应商',
+  proxies: '代理配置',
   'provider-new': '新增供应商',
   'provider-edit': '编辑供应商',
   models: '模型目录',
@@ -66,6 +68,8 @@ function RouteView({ route }: { route: Route }) {
       return <OverviewPage />;
     case 'providers':
       return <ProvidersPage />;
+    case 'proxies':
+      return <ProxiesPage />;
     case 'provider-new':
       // key 让创建页和编辑页成为不同实例：创建成功跳转后必须重新读取服务端配置，
       // 不能沿用新表单的 state，否则授权卡片和原始标识都不会出现。
