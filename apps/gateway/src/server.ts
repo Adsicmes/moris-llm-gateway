@@ -8,6 +8,7 @@ import type { ProviderAccount, Settings } from '../../../packages/contracts/src/
 import { Store, type Bill, type Device } from './store.js';
 import { Providers, ProviderRegistry } from './providers.js';
 import { Transport } from './network.js';
+import { ProviderDeletions } from './provider-deletion.js';
 import { safeEqual, verifyPassword } from './security.js';
 import { executeRequest, GatewayError } from './routing.js';
 import { modelParametersSchema, resolveModelParameters } from './model-parameters.js';
@@ -26,7 +27,13 @@ const accountSchema = z.object({
   proxyUrl: proxySchema.optional(), proxyId: z.string().min(1).nullable().optional(), autoCreateTokens: z.boolean().default(false), tokenTemplate: tokenTemplate.optional(),
   options: z.record(z.string(), z.unknown()).default({}), secrets: z.record(z.string(), z.string()).optional(),
 }).strict();
+// PATCH 不应用创建默认值，否则仅换密钥也会隐式启用账号或覆盖 options。
+const accountPatchSchema = accountSchema.omit({ namespace: true, plugin: true }).partial().extend({
+  enabled: z.boolean().optional(), autoCreateTokens: z.boolean().optional(), options: z.record(z.string(), z.unknown()).optional(),
+});
 const billSchema = z.object({ accountId: z.string(), paidAt: z.iso.datetime({ offset: true }), amountCny: z.number().finite().min(-1e10).max(1e10).refine(x => Math.abs(x * 100 - Math.round(x * 100)) < 0.00001, '人民币金额最多两位小数'), period: z.string().max(100).optional(), method: z.string().max(100).optional(), note: z.string().max(2000).optional() }).strict();
+const deletionSchema = z.object({ revision: z.string().min(1), selectedActionIds: z.array(z.string()).max(10000), adoptActionIds: z.array(z.string()).max(10000),
+  confirmNamespace: z.string(), acknowledgeUnsettled: z.boolean(), acknowledgeUncleaned: z.boolean() }).strict();
 const settingsSchema = z.object({
   catalogRefreshMs: z.number().int().min(1000).max(86_400_000), monitorRefreshMs: z.number().int().min(1000).max(86_400_000),
   catalogTtlMs: z.number().int().min(1000).max(7 * 86_400_000), balanceStaleMs: z.number().int().min(1000).max(86_400_000),
@@ -49,6 +56,19 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   const attempts = new Map<string, { count: number; until: number }>();
   const authorizations = new Map<string, { grant: DeviceAuthorization; owner: string; updatedAt: string; nextPoll: number; busy: boolean }>();
   const startingAuthorization = new Set<string>();
+  const deletions = new ProviderDeletions(store, providers, id => { authorizations.delete(id); });
+  const requireUnlocked = (id: string): ProviderAccount => {
+    const account = requireAccount(store, id);
+    if (account.deletionTaskId) throw new GatewayError('deletion_busy', '供应商正在删除，请查看删除进度', 409);
+    return account;
+  };
+  const requireRepairable = (account: ProviderAccount) => {
+    const task = account.deletionTaskId ? store.deletion(account.deletionTaskId) : undefined;
+    if (account.deletionTaskId && (!task || !['failed', 'paused'].includes(task.status) || deletions.busy(account.id))) throw new GatewayError('deletion_busy', '删除执行中，不能修改配置或代理；失败或暂停后可修复凭据与代理', 409);
+  };
+  const requireBillingIdentity = (id: string) => {
+    if (!store.account(id) && !store.historicalAccount(id)) throw new GatewayError('not_found', '供应商或历史身份不存在', 404);
+  };
   await app.register(cookie);
   app.addHook('onResponse', async (req, reply) => {
     app.log.info({ requestId: req.id, method: req.method, route: req.routeOptions.url, status: reply.statusCode, elapsedMs: reply.elapsedTime }, '请求完成');
@@ -130,14 +150,18 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   };
   app.post('/api/admin/proxies', async req => ({ item: proxyView(writeProxy(req.body)) }));
   app.patch('/api/admin/proxies/:id', async req => {
+    for (const reference of store.proxyReferences(idParam(req))) requireRepairable(requireAccount(store, reference.id));
+    return providers.resourceLock(async () => {
     const old = requireProxy(idParam(req));
     const references = store.proxyReferences(old.id);
+    for (const reference of references) requireRepairable(requireAccount(store, reference.id));
     if (references.some(account => startingAuthorization.has(account.id) || authorizations.get(account.id)?.busy)) throw new GatewayError('oauth_busy', '引用此代理的供应商正在执行授权请求，请稍后再保存', 409);
     const oldUrl = profileProxyUrl(old, store.proxyPassword(old.id));
     const profile = writeProxy(req.body, old);
     for (const account of references) authorizations.delete(account.id);
     void transport.retire(oldUrl).catch(() => {});
     return { item: proxyView(profile) };
+    });
   });
   app.delete('/api/admin/proxies/:id', async req => {
     const profile = requireProxy(idParam(req));
@@ -166,19 +190,34 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     finally { diagnosing.delete(profile.id); await probe.close(); }
   });
   app.get('/api/admin/providers', async () => ({ items: store.accounts() }));
-  app.post('/api/admin/providers', async req => {
-    const data = accountSchema.parse(req.body);
+  app.get('/api/admin/provider-history', async () => ({ items: store.history() }));
+  app.get('/api/admin/provider-deletions', async () => ({ items: store.deletions().map(task => deletions.view(task)) }));
+  app.get('/api/admin/provider-deletions/:id', async req => ({ item: deletions.view(deletions.requireTask(idParam(req))) }));
+  app.post('/api/admin/provider-deletions/:id/retry', async req => { z.object({}).strict().parse(req.body); return { item: await deletions.retry(idParam(req)) }; });
+  app.post('/api/admin/provider-deletions/:id/cancel', async req => { z.object({}).strict().parse(req.body); return { item: deletions.cancel(idParam(req)) }; });
+  app.post('/api/admin/providers/:id/deletion-preview', async req => { requireUnlocked(idParam(req)); return deletions.preview(idParam(req)); });
+  app.post('/api/admin/providers/:id/deletions', async (req, reply) => {
+    const item = await deletions.start(idParam(req), deletionSchema.parse(req.body));
+    return reply.code(202).send({ item });
+  });
+  app.post('/api/admin/providers', async req => providers.resourceLock(async () => {
+    const data = accountSchema.extend({ acknowledgeNamespaceReuse: z.boolean().optional() }).parse(req.body);
     validateBinding(data);
     if (!options.registry.list().some(p => p.id === data.plugin)) throw new GatewayError('plugin_missing', '供应商插件未安装');
     if (store.accounts().some(a => a.namespace === data.namespace)) throw new GatewayError('namespace_exists', '供应商标识已存在', 409);
-    const { secrets, proxyUrl, ...fields } = data;
+    if (store.history().some(a => a.namespace === data.namespace) && !data.acknowledgeNamespaceReuse) throw new GatewayError('namespace_reuse', '此命名空间曾使用过，旧客户端同名路径可能转到新账号，请明确确认', 409);
+    const { secrets, proxyUrl, acknowledgeNamespaceReuse: _acknowledged, ...fields } = data;
     const account: ProviderAccount = { ...fields, id: randomUUID(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), proxyUrl: publicProxy(proxyUrl) };
     store.saveAccount(account, { ...secrets, ...(proxyUrl ? { __proxyUrl: proxyUrl } : {}) });
     return { item: account };
-  });
+  }));
   app.patch('/api/admin/providers/:id', async req => {
+    requireRepairable(requireAccount(store, idParam(req)));
+    return providers.resourceLock(async () => {
     const id = idParam(req); const old = requireAccount(store, id);
-    const data = accountSchema.omit({ namespace: true, plugin: true }).partial().parse(req.body);
+    const data = accountPatchSchema.parse(req.body);
+    requireRepairable(old);
+    if (old.deletionTaskId && Object.keys(data).some(key => !['secrets', 'proxyUrl', 'proxyId'].includes(key))) throw new GatewayError('deletion_locked', '删除暂停时仅允许修复凭据与代理；如需修改其他配置，请先取消删除', 409);
     validateBinding(data);
     const { secrets, proxyUrl, ...fields } = data;
     const account: ProviderAccount = { ...old, ...fields, updatedAt: new Date().toISOString(), ...(proxyUrl !== undefined ? { proxyUrl: publicProxy(proxyUrl) } : {}) };
@@ -186,29 +225,31 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     if (data.proxyId !== undefined) delete account.proxyUrl;
     store.saveAccount(account, { ...secrets, ...(proxyUrl !== undefined ? { __proxyUrl: proxyUrl } : {}), ...(data.proxyId !== undefined ? { __proxyUrl: '' } : {}) });
     return { item: account };
+    });
   });
-  app.delete('/api/admin/providers/:id', async req => { const account = requireAccount(store, idParam(req)); store.saveAccount({ ...account, enabled: false, updatedAt: new Date().toISOString() }); return { ok: true }; });
-  app.post('/api/admin/providers/:id/sync', async req => { requireAccount(store, idParam(req)); return providers.manualSync(idParam(req)); });
+  app.delete('/api/admin/providers/:id', async req => { const account = requireUnlocked(idParam(req)); store.saveAccount({ ...account, enabled: false, updatedAt: new Date().toISOString() }); return { ok: true }; });
+  app.post('/api/admin/providers/:id/sync', async req => { requireUnlocked(idParam(req)); return providers.manualSync(idParam(req)); });
   app.post('/api/admin/providers/:id/oauth/start', async req => {
-    const account = requireAccount(store, idParam(req));
+    const account = requireUnlocked(idParam(req));
     const auth = options.registry.get(account.plugin).authorization;
     if (!auth) throw new GatewayError('oauth_unsupported', '此供应商插件不支持设备授权');
     if (startingAuthorization.has(account.id) || authorizations.get(account.id)?.busy) throw new GatewayError('oauth_busy', '授权操作正在进行，请稍后重试', 409);
     for (const [id, value] of authorizations) if (Date.parse(value.grant.expiresAt) <= Date.now()) authorizations.delete(id);
     startingAuthorization.add(account.id);
+    const release = providers.acquire(account.id);
     try {
       const grant = await auth.start(providers.context(account, AbortSignal.timeout(30_000)));
       if (!grant.deviceAuthId || !grant.userCode || !Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now() || !Number.isFinite(grant.intervalSeconds) || grant.intervalSeconds <= 0 || !['https:', 'http:'].includes(new URL(grant.verificationUrl).protocol)) throw new Error('Invalid device authorization');
       const intervalSeconds = Math.max(1, grant.intervalSeconds);
-      authorizations.set(account.id, { grant: { ...grant, intervalSeconds }, owner: req.cookies.moris_session!, updatedAt: account.updatedAt, nextPoll: Date.now() + intervalSeconds * 1000, busy: false });
+      if (!store.deleting(account.id) && store.account(account.id)?.updatedAt === account.updatedAt) authorizations.set(account.id, { grant: { ...grant, intervalSeconds }, owner: req.cookies.moris_session!, updatedAt: account.updatedAt, nextPoll: Date.now() + intervalSeconds * 1000, busy: false });
       return { verificationUrl: grant.verificationUrl, userCode: grant.userCode, expiresAt: grant.expiresAt, intervalSeconds };
     } catch (error) {
       const failure = oauthFailure(error, 'start');
       throw new GatewayError('oauth_start_failed', failure.message, failure.status);
-    } finally { startingAuthorization.delete(account.id); }
+    } finally { startingAuthorization.delete(account.id); release(); }
   });
   app.post('/api/admin/providers/:id/oauth/poll', async req => {
-    const account = requireAccount(store, idParam(req));
+    const account = requireUnlocked(idParam(req));
     const value = authorizations.get(account.id);
     if (!value || value.owner !== req.cookies.moris_session) throw new GatewayError('oauth_missing', '请在当前登录会话中重新开始授权', 409);
     if (Date.parse(value.grant.expiresAt) <= Date.now() || value.updatedAt !== account.updatedAt) {
@@ -220,6 +261,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     if (!auth) throw new GatewayError('oauth_unsupported', '供应商授权能力不可用');
     value.busy = true;
     value.nextPoll = Date.now() + value.grant.intervalSeconds * 1000;
+    const release = providers.acquire(account.id);
     try {
       const result = await auth.poll(providers.context(account, AbortSignal.timeout(30_000)), value.grant);
       if (result.state === 'complete') authorizations.delete(account.id);
@@ -233,20 +275,21 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
       authorizations.delete(account.id);
       const failure = oauthFailure(error, 'poll');
       throw new GatewayError('oauth_poll_failed', failure.message, failure.status);
-    } finally { value.busy = false; }
+    } finally { value.busy = false; release(); }
   });
   app.get('/api/admin/providers/:id/authorization', async req => {
-    const account = requireAccount(store, idParam(req));
+    const account = requireUnlocked(idParam(req));
     const auth = options.registry.get(account.plugin).authorization;
     if (!auth) return { supported: false, authorized: false, statusKnown: false };
     if (!auth.status) return { supported: true, authorized: false, statusKnown: false };
+    const release = providers.acquire(account.id);
     try {
       const status = await auth.status(providers.context(account, AbortSignal.timeout(10_000)));
       return { supported: true, statusKnown: true, ...status, checkedAt: new Date().toISOString() };
     } catch {
       // 不把上游错误正文或任何令牌返回浏览器。
       throw new GatewayError('oauth_status_failed', '无法读取授权状态；令牌不会返回浏览器，请稍后重试', 502);
-    }
+    } finally { release(); }
   });
   app.get('/api/admin/models', async () => ({ items: store.models().map(model => ({ ...model, enabled: providers.callable(model), disabledReason: providers.callable(model) ? undefined : model.disabledReason ?? '目录过期或供应商已停用' })) }));
   const parameterState = (id: string) => {
@@ -260,6 +303,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     const id = idParam(req);
     const data = z.object({ overrides: modelParametersSchema, revision: z.string().nullable() }).strict().parse(req.body);
     const current = parameterState(id);
+    requireUnlocked(current.automatic.accountId);
     if (current.revision !== data.revision) throw new GatewayError('conflict', '参数已被其他页面修改，请重新读取后再保存', 409);
     const result = resolveModelParameters(current.automatic, data.overrides);
     if ((data.overrides.context !== undefined || data.overrides.output !== undefined || data.overrides.input !== undefined) && result.limit.context != null &&
@@ -286,13 +330,13 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   });
   app.get('/api/admin/bills', async () => ({ items: store.bills(), totalCny: roundCny(store.bills().reduce((sum, b) => sum + b.amountCny, 0)) }));
   app.post('/api/admin/bills', async req => {
-    const value = billSchema.parse(req.body); requireAccount(store, value.accountId);
+    const value = billSchema.parse(req.body); requireBillingIdentity(value.accountId);
     const item: Bill = { ...value, paidAt: new Date(value.paidAt).toISOString(), id: randomUUID(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     store.saveBill(item); return { item };
   });
   app.patch('/api/admin/bills/:id', async req => {
     const old = store.bills().find(b => b.id === idParam(req)); if (!old) throw new GatewayError('not_found', '账单不存在', 404);
-    const value = billSchema.partial().parse(req.body); if (value.accountId) requireAccount(store, value.accountId);
+    const value = billSchema.partial().parse(req.body); if (value.accountId) requireBillingIdentity(value.accountId);
     const item: Bill = { ...old, ...value, updatedAt: new Date().toISOString(), paidAt: value.paidAt ? new Date(value.paidAt).toISOString() : old.paidAt };
     store.saveBill(item); return { item };
   });
@@ -326,7 +370,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
     app.setNotFoundHandler((req, reply) => req.method === 'GET' && !req.url.startsWith('/api/') && !req.url.startsWith('/v1/') ? reply.sendFile('index.html') : reply.code(404).send({ error: { code: 'not_found', message: '接口不存在' } }));
   }
   if (options.background !== false) providers.start();
-  app.addHook('onClose', async () => { await providers.close(); await transport.close(); });
+  app.addHook('onClose', async () => { await deletions.close(); await providers.close(); await transport.close(); });
   return app;
 }
 function idParam(req: FastifyRequest): string { return (req.params as { id: string }).id; }

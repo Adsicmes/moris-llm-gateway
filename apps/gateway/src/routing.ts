@@ -76,6 +76,7 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
       const current = store.model(model.id);
       if (!current || !providers.callable(current)) { targetIndex++; if (targetIndex >= eligible.length) break; number--; continue; }
       const account = store.account(model.accountId)!; const plugin = providers.registry.get(account.plugin);
+      const releaseAccount = providers.acquire(account.id);
       const attempt: AttemptRecord = {
         id: randomUUID(), requestId: request.id, accountId: account.id, modelId: model.id, number,
         startedAt: new Date().toISOString(), finishedAt: null, status: 'running', usage: null, price: model.price,
@@ -156,6 +157,7 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
         else failure = new UpstreamFailure(!signal.aborted && (attemptAbort.signal.aborted || error instanceof TypeError));
         finalStatus = failure.status;
       } finally {
+        try {
         if (timeout) clearTimeout(timeout);
         attemptAbort.abort();
         if (response?.body && !response.body.locked) await response.body.cancel().catch(() => undefined);
@@ -178,6 +180,7 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
           attempt.equivalentUsd = asUsd(equivalent, settings.usdCny);
           store.saveAttempt(attempt);
         }
+        } finally { releaseAccount(); }
       }
       if (success || emitted || signal.aborted || !failure?.retryable || number >= settings.maxAttempts) break;
       if (targetIndex + 1 < eligible.length) targetIndex++;

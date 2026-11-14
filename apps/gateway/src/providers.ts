@@ -19,24 +19,72 @@ export class ProviderRegistry {
   }
 }
 export class Providers {
+  private activity = new Map<string, number>();
+  private idleWaiters = new Map<string, Array<() => void>>();
+  private resourceQueue: Promise<void> = Promise.resolve();
   private pending = new Map<string, Promise<{ ok: boolean; state: string; error?: string }>>();
   private schedule = new Map<string, { catalog: number; monitor: number; failures: number }>();
   private manualRefreshAt = new Map<string, number>();
   private timer?: ReturnType<typeof setInterval>;
   private stop = new AbortController();
   constructor(readonly store: Store, readonly registry: ProviderRegistry, readonly transport: Transport, private fetchOverride?: typeof fetch) {}
+  /** 同步入场计数，涵盖还没持久化 attempt 的 prepare 和授权刷新。 */
+  acquire(id: string): () => void {
+    if (!this.store.account(id) || this.store.deleting(id)) throw new Error('供应商正在删除或已不存在');
+    this.activity.set(id, (this.activity.get(id) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return; released = true;
+      const remaining = (this.activity.get(id) ?? 1) - 1;
+      if (remaining) this.activity.set(id, remaining);
+      else { this.activity.delete(id); for (const resolve of this.idleWaiters.get(id) ?? []) resolve(); this.idleWaiters.delete(id); }
+    };
+  }
+  isBusy(id: string): boolean { return (this.activity.get(id) ?? 0) > 0; }
+  waitForIdle(id: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (!this.isBusy(id)) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const remove = () => {
+        signal?.removeEventListener('abort', abort);
+        const waiters = (this.idleWaiters.get(id) ?? []).filter(item => item !== done);
+        if (waiters.length) this.idleWaiters.set(id, waiters); else this.idleWaiters.delete(id);
+      };
+      const done = () => { remove(); resolve(); };
+      const abort = () => { remove(); reject(signal?.reason); };
+      this.idleWaiters.set(id, [...(this.idleWaiters.get(id) ?? []), done]);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+  }
+  /** 资源管理低频路径串行；不包围推理请求，避免阻塞其他账号的流。 */
+  async resourceLock<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.resourceQueue;
+    let release!: () => void;
+    this.resourceQueue = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { return await work(); } finally { release(); }
+  }
   context(account: ProviderAccount, signal: AbortSignal): ProviderContext {
     const secrets = this.store.secrets(account.id);
     const actualProxy = accountProxy(this.store, account);
+    const managedResources = this.store.resources().filter(item => item.plugin === account.plugin);
     return {
       account, secrets, signal, now: () => new Date(),
+      managedResources,
+      recordResource: async input => {
+        const saved = this.store.recordResource(account.plugin, account.id, input);
+        const index = managedResources.findIndex(item => item.id === saved.id);
+        if (index < 0) managedResources.push(saved); else managedResources[index] = saved;
+      },
       fetch: (async (input, init) => (this.fetchOverride ?? this.transport.fetch(actualProxy, this.store.settings().connectTimeoutMs))(input, { ...init, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal })) as typeof fetch,
       updateSecrets: async patch => { this.store.patchSecrets(account.id, patch); Object.assign(secrets, patch); },
     };
   }
   async sync(id: string, catalog = true): Promise<{ ok: boolean; state: string; error?: string }> {
+    if (this.store.deleting(id)) return { ok: false, state: 'disabled', error: '供应商正在删除，不能同步' };
     const ongoing = this.pending.get(id); if (ongoing) return ongoing;
-    const work = this.performSync(id, catalog).finally(() => this.pending.delete(id));
+    const release = this.acquire(id);
+    const work = this.resourceLock(() => this.performSync(id, catalog)).finally(() => { this.pending.delete(id); release(); });
     this.pending.set(id, work); return work;
   }
   async manualSync(id: string): Promise<{ ok: boolean; state: string; error?: string }> {
@@ -48,7 +96,7 @@ export class Providers {
   }
   private async performSync(id: string, catalog: boolean): Promise<{ ok: boolean; state: string; error?: string }> {
     const account = this.store.account(id);
-    if (!account || !account.enabled) return { ok: false, state: 'disabled', error: '供应商已停用' };
+    if (!account || !account.enabled || account.deletionTaskId) return { ok: false, state: 'disabled', error: '供应商已停用或正在删除' };
     const at = new Date().toISOString();
     const context = this.context(account, AbortSignal.any([this.stop.signal, AbortSignal.timeout(120_000)]));
     const plugin = this.registry.get(account.plugin);
@@ -92,7 +140,7 @@ export class Providers {
   }
   callable(model: CatalogModel, now = Date.now()): boolean {
     const account = this.store.account(model.accountId); const synced = Date.parse(model.syncedAt);
-    return !!account?.enabled && model.enabled && Number.isFinite(synced) && synced <= now && now - synced < this.store.settings().catalogTtlMs;
+    return !!account?.enabled && !account.deletionTaskId && model.enabled && Number.isFinite(synced) && synced <= now && now - synced < this.store.settings().catalogTtlMs;
   }
   catalog(): CatalogResponse {
     return {
