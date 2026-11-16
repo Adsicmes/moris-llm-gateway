@@ -7,11 +7,11 @@ import { ProviderRegistry } from '../apps/gateway/src/providers.js';
 import type { ProviderAccount, ProviderModel } from '../packages/contracts/src/index.js';
 import { accountProxy, proxyUrl } from '../apps/gateway/src/proxy.js';
 
-async function fixture(fetcher: typeof fetch) {
+async function fixture(fetcher: typeof fetch, options: { protocol?: 'chat-completions' | 'responses' } = {}) {
   const store = new Store(':memory:', randomBytes(32).toString('base64'));
   store.initializeAdmin('admin', 'a-test-password-only');
   const account: ProviderAccount = { id: 'a', namespace: 'test', name: '测试', plugin: 'test', baseUrl: 'https://upstream.test', billingType: 'metered', enabled: true, autoCreateTokens: false, options: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  const model: ProviderModel = { path: 'g/m', upstreamModel: 'm', name: 'M', family: 'm', protocol: 'chat-completions', capabilities: { tools: true, input: ['text', 'image'], output: ['text'] }, limit: { context: 10000, output: 1000 }, variants: {}, price: { kind: 'token', currency: 'USD', input: 1, output: 2 } };
+  const model: ProviderModel = { path: 'g/m', upstreamModel: 'm', name: 'M', family: 'm', protocol: options.protocol ?? 'chat-completions', capabilities: { tools: true, input: ['text', 'image'], output: ['text'] }, limit: { context: 10000, output: 1000 }, variants: {}, price: { kind: 'token', currency: 'USD', input: 1, output: 2 } };
   store.saveAccount(account, { apiKey: 'upstream-secret' }); store.replaceCatalog(account, [model], new Date().toISOString());
   const registry = new ProviderRegistry();
   registry.register({
@@ -25,7 +25,7 @@ async function fixture(fetcher: typeof fetch) {
       authorization: { supported: false, hint: '测试不支持授权' },
     },
     discover: async () => ({ complete: true, models: [model] }),
-    prepare: async (ctx, m, body) => ({ url: 'https://upstream.test/v1/chat/completions', headers: { authorization: `Bearer ${ctx.secrets.apiKey}` }, body: { ...body, model: m.upstreamModel } }),
+    prepare: async (ctx, m, body) => ({ url: 'https://upstream.test/v1/chat/completions', headers: { authorization: `Bearer ${ctx.secrets.apiKey}`, 'Content-Type': 'application/json' }, body: { ...body, model: m.upstreamModel }, ...(options.protocol === 'responses' ? { responseFormat: 'sse' as const } : {}) }),
   });
   const device = store.createDevice('test');
   const app = await createApp({ store, registry, fetch: fetcher, secureCookie: false, background: false });
@@ -120,6 +120,55 @@ test('临时失败最多三次，每次费用留存，不透传设备密钥', as
     assert.equal(result.statusCode, 503); assert.equal(calls, 3); assert.equal(f.store.attempts().length, 3);
     assert.equal(f.store.requests().length, 1); assert.ok(f.store.attempts().every(a => a.estimatedCost !== null));
     assert.ok(!JSON.stringify(f.store.attempts()).includes('secret prompt')); assert.ok(!result.body.includes('private prompt'));
+  } finally { await f.close(); }
+});
+test('上游请求头只带一个 Content-Type，避免大小写重复被判 400', async () => {
+  let contentTypes: string[] = [];
+  const f = await fixture((async (_url, init) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    contentTypes = Object.keys(headers).filter((key) => key.toLowerCase() === 'content-type');
+    return Response.json({ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  }) as typeof fetch);
+  try {
+    const res = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', messages: [{ role: 'user', content: 'hi' }] } });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual(contentTypes.map((key) => key.toLowerCase()), ['content-type']);
+  } finally { await f.close(); }
+});
+test('上游 SSE 响应不带 content-type 时仍按流式转发', async () => {
+  const f = await fixture((async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }) as typeof fetch);
+  try {
+    const res = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', stream: true } });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.match(res.body, /hi/);
+    assert.equal(f.store.requests()[0]?.status, 'succeeded');
+  } finally { await f.close(); }
+});
+test('上游 200 但是非 SSE 内容类型时不当流解析', async () => {
+  const f = await fixture((async () => Response.json({ error: 'not a stream' }, { status: 200 })) as typeof fetch);
+  try {
+    const res = await f.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: f.headers, payload: { model: 'test/g/m', stream: true } });
+    assert.equal(res.statusCode, 502);
+    assert.equal(f.store.requests()[0]?.status, 'failed');
+  } finally { await f.close(); }
+});
+test('非流式汇总同样接受不带 content-type 的上游 SSE', async () => {
+  const sse = 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":2}}}\n\n';
+  const f = await fixture((async () => new Response(sse, { status: 200 })) as typeof fetch, { protocol: 'responses' });
+  try {
+    const res = await f.app.inject({ method: 'POST', url: '/v1/responses', headers: f.headers, payload: { model: 'test/g/m', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] } });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().id, 'resp_1');
+    assert.equal(f.store.requests()[0]?.status, 'succeeded');
+    assert.equal(f.store.attempts()[0]?.usage?.input, 5);
   } finally { await f.close(); }
 });
 test('认证错误不重试，未知用量保持null', async () => {
