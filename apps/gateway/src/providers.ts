@@ -5,6 +5,13 @@ import { Transport } from './network.js';
 import { estimateWindow, settle } from './billing.js';
 import { accountProxy } from './proxy.js';
 
+/** 同步失败要能被诊断，但不能带出代理凭据或超长上游正文。 */
+function describeError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const cleaned = raw.replace(/\/\/[^/@\s]*@/g, '//***@').replace(/\s+/g, ' ').trim();
+  return cleaned.length > 300 ? `${cleaned.slice(0, 300)}…` : cleaned || '未知错误';
+}
+
 export class ProviderRegistry {
   private plugins = new Map<string, ProviderPlugin>();
   register(plugin: ProviderPlugin): void {
@@ -111,8 +118,8 @@ export class Providers {
           if (!['chat-completions', 'responses', 'messages'].includes(model.protocol) || !model.capabilities || !model.limit || !model.price) throw new Error('模型目录结构无效');
         }
         this.store.replaceCatalog(account, discovery.models, new Date().toISOString());
-      } catch {
-        failed = true; message = '模型目录同步失败，请检查凭据、权限及插件配置；保留最后成功目录';
+      } catch (error) {
+        failed = true; message = `模型目录同步失败：${describeError(error)}`;
         this.store.syncError(id, message, at);
       }
     }
@@ -121,10 +128,10 @@ export class Providers {
       if (monitor.state === 'error') throw new Error('供应商监控失败');
       if (monitor.balances.some(b => !Number.isFinite(b.amount)) || monitor.windows.some(w => !Number.isFinite(w.usedRatio) || w.usedRatio < 0 || w.usedRatio > 1)) throw new Error('额度数据无效');
       this.store.saveMonitor(id, monitor);
-    } catch {
+    } catch (error) {
       const old = this.store.monitor(id);
       this.store.saveMonitor(id, { state: 'error', balances: old?.balances ?? [], windows: old?.windows ?? [], sampledAt: old?.sampledAt ?? at, message: '余额或额度获取失败，保留数据及其原始采样时间' });
-      failed = true; message ??= '余额或额度获取失败';
+      failed = true; message ??= `余额或额度获取失败：${describeError(error)}`;
     }
     if (plugin.reconcile) {
       try {

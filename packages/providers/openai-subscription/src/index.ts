@@ -20,6 +20,11 @@ const DEFAULT_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const ORIGINATOR = 'codex_cli_rs';
 const MODELS_SOURCE =
   'https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/endpoint/models.rs（/models?client_version=）';
+const LATEST_CLIENT_VERSION_URL = 'https://registry.npmjs.org/@openai/codex/latest';
+/** 上游只返回 minimal_client_version 不高于 client_version 的模型，内置版本必须是一个真实发布过的新版本。 */
+const FALLBACK_CLIENT_VERSION = '0.169.0';
+const CLIENT_VERSION_TTL_MS = 6 * 3600_000;
+let clientVersionCache: { version: string; at: number } | null = null;
 const USAGE_SOURCE =
   'https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs（/wham/usage）';
 const AUTH_SOURCE =
@@ -601,19 +606,63 @@ function subscriptionPrice(): Price {
   };
 }
 
-async function discover(context: ProviderContext): Promise<Discovery> {
-  const tokens = await ensureTokens(context);
+/** 取一次 /models 目录；client_version 同时写进 UA，行为与 Codex CLI 一致。 */
+async function fetchModelCatalog(
+  context: ProviderContext,
+  tokens: TokenState,
+  clientVersion: string,
+): Promise<JsonObject[]> {
   const base = rootUrl(context.account.baseUrl);
-  const clientVersion = asString(context.account.options.clientVersion) ?? '0.1.0';
-  const body = await fetchJson(
-    context,
-    `${base}/models?client_version=${encodeURIComponent(clientVersion)}`,
-    authHeaders(tokens.accessToken, tokens.accountId),
-  );
-  const modelsRaw = asArray(asObject(body)?.models)
+  const body = await fetchJson(context, `${base}/models?client_version=${encodeURIComponent(clientVersion)}`, {
+    ...authHeaders(tokens.accessToken, tokens.accountId),
+    'user-agent': `${ORIGINATOR}/${clientVersion}`,
+  });
+  return asArray(asObject(body)?.models)
     .map((item) => asObject(item))
     .filter((item): item is JsonObject => !!item);
-  if (!modelsRaw.length) throw new ProviderError('OpenAI 订阅 /models 返回空目录', 'catalog_empty');
+}
+
+/**
+ * 官方 Codex CLI 的最新发布版本，用来在空目录时纠正过低的 client_version。
+ * 取不到时返回 null，由调用方保留内置版本并给出可诊断的错误。
+ */
+async function latestClientVersion(context: ProviderContext): Promise<string | null> {
+  if (clientVersionCache && context.now().getTime() - clientVersionCache.at < CLIENT_VERSION_TTL_MS) {
+    return clientVersionCache.version;
+  }
+  const url = asString(context.account.options.clientVersionUrl) ?? LATEST_CLIENT_VERSION_URL;
+  try {
+    const response = await context.fetch(url, { signal: context.signal, headers: { Accept: 'application/json' } });
+    if (!response.ok) return null;
+    const version = asString(asObject(await response.json())?.version);
+    if (!version || !/^\d+\.\d+\.\d+$/.test(version)) return null;
+    clientVersionCache = { version, at: context.now().getTime() };
+    return version;
+  } catch {
+    return null;
+  }
+}
+
+async function discover(context: ProviderContext): Promise<Discovery> {
+  const tokens = await ensureTokens(context);
+  const override = asString(context.account.options.clientVersion);
+  let clientVersion = override ?? FALLBACK_CLIENT_VERSION;
+  let modelsRaw = await fetchModelCatalog(context, tokens, clientVersion);
+  // 空目录先按真实的 Codex CLI 最新版本重试一次：上游按 minimal_client_version 逐模型过滤，
+  // 版本过低时 HTTP 200 但返回 {"models":[]}，不能当成“账号没有模型”。
+  if (!modelsRaw.length && !override) {
+    const latest = await latestClientVersion(context);
+    if (latest && latest !== clientVersion) {
+      clientVersion = latest;
+      modelsRaw = await fetchModelCatalog(context, tokens, clientVersion);
+    }
+  }
+  if (!modelsRaw.length) {
+    throw new ProviderError(
+      `OpenAI 订阅 /models 返回空目录（client_version=${clientVersion}）：上游按每个模型的 minimal_client_version 过滤，客户端版本过低或该账号无可用模型都会得到空列表。可在供应商选项 clientVersion 中指定版本后重试。`,
+      'catalog_empty',
+    );
+  }
 
   const modelsDev = await loadModelsDev(context);
   if (modelsDev) modelsDev.__providerHint = asString(context.account.options.modelsDevProvider) ?? 'openai';
@@ -637,6 +686,13 @@ async function discover(context: ProviderContext): Promise<Discovery> {
     for (const level of levels) variants[level] = { reasoning: { effort: level } };
     const contextWindow = asNumber(raw.context_window) ?? asNumber(devLimit?.context);
     const outputLimit = asNumber(raw.max_output_tokens) ?? asNumber(devLimit?.output);
+    // models.dev 的 limit.input 常常是计费阶梯用的理论值（例如 922000），超过 context 时不能当模型输入上限，
+    // 否则核心会判定「输入上限无效或超过上下文」并禁用整个模型。
+    const devInput = asNumber(devLimit?.input);
+    const inputLimit =
+      devInput != null && Number.isSafeInteger(devInput) && devInput > 0 && (contextWindow == null || devInput <= contextWindow)
+        ? devInput
+        : null;
     const tools =
       typeof raw.supports_parallel_tool_calls === 'boolean'
         ? raw.supports_parallel_tool_calls
@@ -673,7 +729,7 @@ async function discover(context: ProviderContext): Promise<Discovery> {
         output: ['text'],
         reasoning: levels.length > 0 || dev?.reasoning === true,
       },
-      limit: { context: contextWindow, output: outputLimit, ...(asNumber(devLimit?.input) != null ? { input: asNumber(devLimit?.input)! } : {}) },
+      limit: { context: contextWindow, output: outputLimit, ...(inputLimit != null ? { input: inputLimit } : {}) },
       variants,
       price: subscriptionPrice(),
       ...(referencePrice ? { referencePrice } : {}),
@@ -882,13 +938,14 @@ export const plugin: ProviderPlugin = {
       { key: 'idToken', label: 'idToken', description: '可选。设备授权返回时自动保存，用于读取账户与套餐信息。' },
     ],
     options: {
-      example: { issuer: 'https://auth.openai.com', clientVersion: '0.1.0' },
+      example: { issuer: 'https://auth.openai.com' },
       hint: '一般留空。只有使用自建授权/反代服务时才需要覆盖 issuer、tokenUrl 或 clientId。',
       fields: [
         { key: 'issuer', description: '设备授权与刷新令牌的 issuer，默认 https://auth.openai.com。' },
         { key: 'tokenUrl', description: '自定义刷新令牌地址；默认 issuer + /oauth/token。' },
         { key: 'clientId', description: 'OAuth 客户端 ID；默认与 Codex CLI 一致。' },
-        { key: 'clientVersion', description: '/models 请求的 client_version，默认 0.1.0。' },
+        { key: 'clientVersion', description: '/models 请求的 client_version，默认跟随 Codex CLI 最新发布版本（内置 0.169.0，空目录时自动按 npm 上的最新版本重试一次）；上游按每个模型的 minimal_client_version 过滤，版本过低会返回空目录。' },
+        { key: 'clientVersionUrl', description: '可选，读取 Codex CLI 最新版本的地址，默认 https://registry.npmjs.org/@openai/codex/latest。' },
         { key: 'modelsDev / modelsDevUrl / modelsDevProvider', description: '可选的原厂参考价来源；只影响参考价，不影响订阅 price=0。' },
         { key: 'planPrice', description: '可选 {amount,currency}，用于余额页展示套餐标价。' },
       ],
