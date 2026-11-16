@@ -847,7 +847,7 @@ test("openai subscription: pinned low client version reports the catalog version
   await assert.rejects(() => openaiSubscription.discover(context), /空目录（client_version=0\.1\.0）/);
 });
 
-test("openai subscription: models.dev input above the context window is not copied as a model limit", { timeout: 5000 }, async () => {
+test("openai subscription: 总窗口 = Codex 输入预算 + 输出上限，models.dev 的 API 口径不参与", { timeout: 5000 }, async () => {
   const valid = authJwt('acct-limit', Math.floor(NOW.getTime() / 1000) + 3600);
   const { context } = makeContext(
     account('openai-subscription', {
@@ -879,9 +879,10 @@ test("openai subscription: models.dev input above the context window is not copi
   );
   const result = await openaiSubscription.discover(context);
   const model = result.models[0]!;
-  assert.equal(model.limit.input, undefined);
-  assert.equal(model.limit.context, 272_000);
+  // Codex 输入预算 272k + models.dev 输出上限 128k = 总窗口 400k；models.dev 的 922k/1.05M 是 API 口径，不采用。
+  assert.equal(model.limit.input, 272_000);
   assert.equal(model.limit.output, 128_000);
+  assert.equal(model.limit.context, 400_000);
   assert.equal(model.enabled, true);
 });
 

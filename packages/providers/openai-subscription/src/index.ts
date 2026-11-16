@@ -684,15 +684,16 @@ async function discover(context: ProviderContext): Promise<Discovery> {
       .filter((level): level is string => !!level);
     const variants: Record<string, Record<string, unknown>> = {};
     for (const level of levels) variants[level] = { reasoning: { effort: level } };
-    const contextWindow = asNumber(raw.context_window) ?? asNumber(devLimit?.context);
+    // Codex 的 context_window 是这条订阅路线的**输入**预算（gpt-6.1-* 500k、其余 272k）；
+    // OpenAI 的口径是 total = 最大输入 + 最大输出（6.1 Sol：922k + 128k = 1.05M），
+    // 所以总窗口 = context_window + max_output_tokens，gpt-6.1 得 628k、其余 400k。
+    // models.dev 的 limit.input/context 是 API 口径（922k/1.05M），不能拿来当订阅预算。
+    const inputLimit = asNumber(raw.context_window);
     const outputLimit = asNumber(raw.max_output_tokens) ?? asNumber(devLimit?.output);
-    // models.dev 的 limit.input 常常是计费阶梯用的理论值（例如 922000），超过 context 时不能当模型输入上限，
-    // 否则核心会判定「输入上限无效或超过上下文」并禁用整个模型。
-    const devInput = asNumber(devLimit?.input);
-    const inputLimit =
-      devInput != null && Number.isSafeInteger(devInput) && devInput > 0 && (contextWindow == null || devInput <= contextWindow)
-        ? devInput
-        : null;
+    const contextWindow =
+      inputLimit != null && outputLimit != null
+        ? inputLimit + outputLimit
+        : (inputLimit ?? asNumber(devLimit?.context));
     const tools =
       typeof raw.supports_parallel_tool_calls === 'boolean'
         ? raw.supports_parallel_tool_calls
