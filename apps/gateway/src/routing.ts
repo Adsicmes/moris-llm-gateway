@@ -35,6 +35,13 @@ export function compatible(source: CatalogModel, target: CatalogModel, body: Rec
   const output = body.max_tokens ?? body.max_output_tokens ?? body.max_completion_tokens;
   return typeof output !== 'number' || output <= (target.limit.output ?? 0);
 }
+/** 上游拒绝重复的 Content-Type：插件头里若已带一个（大小写不同），合并后会变成
+ *  "application/json, application/json" 并被判 400 Unsupported content type，这里统一成单值。 */
+export function upstreamHeaders(headers: Record<string, string>): Record<string, string> {
+  const merged = Object.fromEntries(Object.entries(headers).filter(([key]) => key.toLowerCase() !== 'content-type'));
+  merged['content-type'] = 'application/json';
+  return merged;
+}
 async function pause(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) throw signal.reason;
   await new Promise<void>((resolve, reject) => {
@@ -99,7 +106,7 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
         const url = new URL(prepared.url);
         if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new GatewayError('invalid_upstream', '供应商请求地址无效', 502);
         store.saveAttempt(attempt); sent = true;
-        response = await context.fetch(url, { method: 'POST', headers: { ...prepared.headers, 'content-type': 'application/json' }, body: JSON.stringify(prepared.body), signal: attemptSignal });
+        response = await context.fetch(url, { method: 'POST', headers: upstreamHeaders(prepared.headers), body: JSON.stringify(prepared.body), signal: attemptSignal });
         attempt.httpStatus = response.status;
         attempt.upstreamRequestId = response.headers.get('x-request-id') ?? response.headers.get('request-id') ?? undefined;
         if (!response.ok) {
@@ -109,11 +116,18 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
           throw new UpstreamFailure([429, 502, 503, 504].includes(response.status), response.status, retryAfter(response.headers.get('retry-after')));
         }
         if (body.stream) {
-          if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new UpstreamFailure(false);
+          // ChatGPT Codex / 部分反代的 SSE 响应不带 content-type 或是 text/plain；只有明确是 JSON 等类型才拒绝，
+          // 首帧再按 SSE 语法校验，避免把 JSON 当流解析。
+          const streamType = response.headers.get('content-type');
+          if (!response.body || (streamType && !/text\/event-stream|text\/plain/.test(streamType))) throw new UpstreamFailure(false);
           const reader = response.body.getReader(); const decoder = new SseDecoder();
-          let prelude = ''; let terminal = false;
+          let prelude = ''; let terminal = false; let inspected = false;
           const consume = async (frames: ReturnType<SseDecoder['push']>) => {
             for (const frame of frames) {
+              if (!inspected) {
+                inspected = true;
+                if (!/^(?:event:|data:|:)/.test(frame.raw.trimStart())) throw new UpstreamFailure(false);
+              }
               arm(settings.idleTimeoutMs);
               const fact = inspectEvent(protocol, frame.data, usage); usage = fact.usage;
               if (fact.upstreamRequestId && !attempt.upstreamRequestId) attempt.upstreamRequestId = fact.upstreamRequestId;
@@ -152,6 +166,8 @@ export async function executeRequest(providers: Providers, protocol: Protocol, r
           reply.header('x-moris-request-id', request.id).send(result);
         }
       } catch (error) {
+        // 失败原因只写日志，不回传上游正文或提示词。
+        console.error('[moris] upstream attempt failed:', error instanceof Error ? error.message : String(error));
         if (error instanceof GatewayError) failure = new UpstreamFailure(false, error.status);
         else if (error instanceof UpstreamFailure) failure = error;
         else failure = new UpstreamFailure(!signal.aborted && (attemptAbort.signal.aborted || error instanceof TypeError));
@@ -216,9 +232,11 @@ async function boundedJson(response: Response, maxBytes: number): Promise<unknow
 }
 
 async function aggregateResponse(response: Response, arm: (ms: number) => void, idleMs: number, onUsage: (usage: Usage | null) => void): Promise<Record<string, unknown>> {
-  if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new UpstreamFailure(false);
+  // 与流式分支一致：SSE 响应可能不带 content-type 或是 text/plain，用首帧语法兜底校验。
+  const streamType = response.headers.get('content-type');
+  if (!response.body || (streamType && !/text\/event-stream|text\/plain/.test(streamType))) throw new UpstreamFailure(false);
   const reader = response.body.getReader(); const decoder = new SseDecoder();
-  let size = 0; let usage: Usage | null = null;
+  let size = 0; let usage: Usage | null = null; let inspected = false;
   try {
     while (true) {
       const chunk = await reader.read();
@@ -226,6 +244,10 @@ async function aggregateResponse(response: Response, arm: (ms: number) => void, 
       size += chunk.value.length;
       if (size > 32 * 1024 * 1024) throw new UpstreamFailure(false);
       for (const frame of decoder.push(chunk.value)) {
+        if (!inspected) {
+          inspected = true;
+          if (!/^(?:event:|data:|:)/.test(frame.raw.trimStart())) throw new UpstreamFailure(false);
+        }
         arm(idleMs);
         const fact = inspectEvent('responses', frame.data, usage);
         usage = fact.usage; onUsage(usage);

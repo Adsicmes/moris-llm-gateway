@@ -800,6 +800,92 @@ test("openai subscription: valid access token does not refresh and still uses ac
   assert.equal(calls.some((call) => call.url === 'https://auth.openai.com/oauth/token'), false);
 });
 
+test("openai subscription: empty /models retries with the published Codex CLI version", { timeout: 5000 }, async () => {
+  const valid = authJwt('acct-empty', Math.floor(NOW.getTime() / 1000) + 3600);
+  const { context, calls } = makeContext(
+    account('openai-subscription', { baseUrl: 'https://chatgpt.com/backend-api/codex', options: { modelsDev: false } }),
+    { accessToken: valid, accountId: 'acct-empty' },
+    (url) => {
+      if (url === 'https://registry.npmjs.org/@openai/codex/latest') return json({ name: '@openai/codex', version: '0.170.0' });
+      if (url.includes('/models?client_version=0.169.0')) return json({ models: [] });
+      if (url.includes('/models?client_version=0.170.0')) {
+        return json({
+          models: [
+            {
+              slug: 'gpt-test',
+              context_window: 272_000,
+              max_output_tokens: 128_000,
+              supported_in_api: true,
+              supports_parallel_tool_calls: true,
+              minimal_client_version: '0.170.0',
+            },
+          ],
+        });
+      }
+      throw new Error(`unexpected test URL: ${url}`);
+    },
+  );
+  const result = await openaiSubscription.discover(context);
+  assert.equal(result.models.length, 1);
+  assert.equal(result.models[0]?.upstreamModel, 'gpt-test');
+  assert.ok(calls.some((call) => call.url === 'https://registry.npmjs.org/@openai/codex/latest'));
+});
+
+test("openai subscription: pinned low client version reports the catalog version gate", { timeout: 5000 }, async () => {
+  const valid = authJwt('acct-pinned', Math.floor(NOW.getTime() / 1000) + 3600);
+  const { context } = makeContext(
+    account('openai-subscription', {
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      options: { modelsDev: false, clientVersion: '0.1.0' },
+    }),
+    { accessToken: valid, accountId: 'acct-pinned' },
+    (url) => {
+      if (url.includes('/models?client_version=0.1.0')) return json({ models: [] });
+      throw new Error(`unexpected test URL: ${url}`);
+    },
+  );
+  await assert.rejects(() => openaiSubscription.discover(context), /空目录（client_version=0\.1\.0）/);
+});
+
+test("openai subscription: 总窗口 = Codex 输入预算 + 输出上限，models.dev 的 API 口径不参与", { timeout: 5000 }, async () => {
+  const valid = authJwt('acct-limit', Math.floor(NOW.getTime() / 1000) + 3600);
+  const { context } = makeContext(
+    account('openai-subscription', {
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      billingType: 'subscription',
+      options: { clientVersion: '0.169.0', modelsDevUrl: 'https://models-dev.example/api.json' },
+    }),
+    { accessToken: valid, accountId: 'acct-limit' },
+    (url) => {
+      if (url === 'https://models-dev.example/api.json') {
+        return json({
+          openai: {
+            models: {
+              'gpt-test': {
+                limit: { context: 272_000, input: 922_000, output: 128_000 },
+                cost: { input: 2, output: 10 },
+              },
+            },
+          },
+        });
+      }
+      if (url.includes('/models?client_version=0.169.0')) {
+        return json({
+          models: [{ slug: 'gpt-test', context_window: 272_000, supported_in_api: true, supports_parallel_tool_calls: true }],
+        });
+      }
+      throw new Error(`unexpected test URL: ${url}`);
+    },
+  );
+  const result = await openaiSubscription.discover(context);
+  const model = result.models[0]!;
+  // Codex 输入预算 272k + models.dev 输出上限 128k = 总窗口 400k；models.dev 的 922k/1.05M 是 API 口径，不采用。
+  assert.equal(model.limit.input, 272_000);
+  assert.equal(model.limit.output, 128_000);
+  assert.equal(model.limit.context, 400_000);
+  assert.equal(model.enabled, true);
+});
+
 test("openai subscription: device authorization start, pending poll, token exchange and persistence", { timeout: 5000 }, async () => {
   const access = authJwt('acct-device', Math.floor(NOW.getTime() / 1000) + 3600);
   const idToken = authJwt('acct-device', Math.floor(NOW.getTime() / 1000) + 3600);

@@ -289,7 +289,7 @@ OpenAI Codex 公开源码（`openai/codex` main，2026-11-13 读取）：
 | `expiresAt` | 可选 ISO 时间 |
 | `planType` | 可选，套餐标识 |
 
-`account.options`：`clientId`（默认官方常量）、`issuer`（默认 `https://auth.openai.com`，device flow 用）、`tokenUrl`（默认官方刷新端点）、`clientVersion`（默认 `0.1.0`，建议按目标 Codex 客户端版本配置）、`modelsDev`（默认开启，可用 `false` 关闭）、`modelsDevProvider`、`modelsDevUrl`、`planPrice`。
+`account.options`：`clientId`（默认官方常量）、`issuer`（默认 `https://auth.openai.com`，device flow 用）、`tokenUrl`（默认官方刷新端点）、`clientVersion`（默认内置 `0.169.0`；空目录时自动按 npm 上 Codex CLI 最新发布版本重试一次，也可手工指定）、`clientVersionUrl`（默认 `https://registry.npmjs.org/@openai/codex/latest`）、`modelsDev`（默认开启，可用 `false` 关闭）、`modelsDevProvider`、`modelsDevUrl`、`planPrice`。
 
 **已实现 Linux 远程可用的 device authorization flow**，导出给主模型的管理员 API 调用：
 
@@ -340,8 +340,8 @@ type DeviceAuthorizationPoll =
 
 ### 5.3 模型、价格与监控
 
-- 模型目录：`GET {baseUrl}/models?client_version=...`，过滤 `supported_in_api=false` 和 `visibility != "list"`；协议固定 `responses`。
-- 上下文/输出：优先 `context_window`/`max_output_tokens`；缺失时用 models.dev 精确 `openai` provider 的 `limit`。工具能力来自 `supports_parallel_tool_calls`/`tool_mode`/models.dev `tool_call`；仍未知则 `enabled=false`。
+- 模型目录：`GET {baseUrl}/models?client_version=...`，过滤 `supported_in_api=false` 和 `visibility != "list"`；协议固定 `responses`。上游按每个条目的 `minimal_client_version` 过滤，`client_version` 过低时是 **HTTP 200 + `{"models":[]}`**（不是错误码），所以空目录要先怀疑版本门槛：插件会按 npm 上的 Codex CLI 最新版本重试一次，仍为空才报错并带上实际使用的版本。
+- 上下文/输出：`limit.input` 取上游 `context_window`（这条订阅路线的输入预算：gpt-6.1-sol/terra 500,000，其余可见模型 272,000），`limit.output` 取 `max_output_tokens`、缺失时用 models.dev 精确 `openai` provider 的 `limit.output`（128,000），`limit.context` = 输入 + 输出（gpt-6.1 得 **628,000**，其余 **400,000**）。依据：OpenAI 模型页口径是 total = 最大输入 + 最大输出（GPT-6.1 Sol：922,000 + 128,000 = 1,050,000），Codex 只是把默认输入预算降到 500,000；models.dev 的 `input`/`context`（922,000 / 1,050,000）是 API 口径，不适用于订阅路线，直接采用会让核心判定「输入上限无效或超过上下文」并禁用整个模型。上游 `max_context_window`（当前 872,000）是 Codex 侧的调用上限，本地目录不把它当默认窗口。工具能力来自 `supports_parallel_tool_calls`/`tool_mode`/models.dev `tool_call`；仍未知则 `enabled=false`。
 - `prepare`：固定 `store=false`、`stream=true`（Codex Responses 请求契约），删除 `max_output_tokens`/`max_tokens`/`max_completion_tokens`，返回 `responseFormat="sse"`。非流式客户端由核心聚合 `response.completed.response`；流式客户端继续直通。插件不隐瞒这一限制。
 - 变体：`supported_reasoning_levels[].effort` → `variants[effort] = { reasoning: { effort } }`。
 - `price`：订阅请求的客户端成本为 0（`input/output/cacheRead/cacheWrite = 0`），不是“免费 API”；`referencePrice` 来自 models.dev 的 `cost`，含上下文阶梯时保留为 `kind="complex"` 的 `models.dev:<JSON>`，`estimate` 按 `usage.input`（已含缓存）选择阶梯；models.dev 不可用或没有该模型时 `referencePrice.kind="unknown"`，不会把 0 当作 API 等价。
@@ -402,6 +402,6 @@ mise exec -- npx tsx --test tests/providers.test.ts tests/realseek-cleanup.test.
 - vm2api 的 `/v1/models` 不携带价格；不显式补全价格时模型仍可调用，`estimate` 返回 `null` 并写 warning，不会按 0 计价或禁用模型。
 - OpenAI 订阅已实现 device authorization flow；浏览器 PKCE/localhost 回调仍未实现。`deviceAuthId`/`userCode` 的 15 分钟生命周期与轮询调度由管理员 API 保存和处理，不写长期 secrets。
 - device flow 在目标 issuer 返回 404 时需要改用浏览器 PKCE 登录辅助程序；插件不会伪造授权或 token。
-- OpenAI 订阅的 `client_version` 默认 `0.1.0`，目标服务端可能按 Codex 客户端版本过滤模型，需要按实际版本配置。
+- OpenAI 订阅的 `client_version` 内置 `0.169.0`：目标服务端按每个模型的 `minimal_client_version` 过滤，版本过低会返回 `HTTP 200 + {"models":[]}`；空目录时插件按 npm 最新发布版本重试一次，仍空则报错带版本号，必要时用 `options.clientVersion` 手工指定。
 - 各包 `exports` 已指向 `dist/index.js`，`dist` 由 `npm run build:providers`（esbuild）生成；尚未生成 `.d.ts`。
 - 所有“可用模型/余额/窗口”结论都需要在目标实例上复核；本文不构成实测验收。
