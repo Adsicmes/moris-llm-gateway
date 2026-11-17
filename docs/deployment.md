@@ -62,7 +62,7 @@
 - [ ] 已有真实域名，DNS 已指向服务器。
 - [ ] 现有 Caddy 正常服务，且可修改站点配置并重载。
 - [ ] 服务器已安装 Docker Engine 与 Compose v2。
-- [ ] 仓库已放到服务器，例如 `/opt/moris`。
+- [ ] 仓库已放到服务器，例如 `/opt/moris`，且已执行 `git submodule update --init --recursive`（两个客户端插件是独立仓库）。
 - [ ] 已确认服务器出网方式；需要代理的供应商已准备 HTTP / SOCKS5 / Clash 地址。
 - [ ] 已决定主密钥与管理员密码的保存位置（密码管理器或离线介质）。
 

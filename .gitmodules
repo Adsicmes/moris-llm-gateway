@@ -1,0 +1,8 @@
+[submodule "packages/opencode-plugin"]
+	path = packages/opencode-plugin
+	url = https://github.com/Adsicmes/moris-opencode-plugin.git
+	branch = main
+[submodule "packages/openchamber-plugin"]
+	path = packages/openchamber-plugin
+	url = https://github.com/Adsicmes/moris-openchamber-plugin.git
+	branch = main

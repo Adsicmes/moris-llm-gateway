@@ -22,7 +22,10 @@
 
 ### 1. 安装依赖
 
+首次检出后先初始化子模块（两个客户端插件是独立仓库），再安装依赖：
+
 ```bash
+git submodule update --init --recursive
 mise exec -- npm install
 ```
 

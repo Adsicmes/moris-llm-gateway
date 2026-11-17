@@ -6,8 +6,10 @@
 
 | 包 | 目录 | 作用 |
 | --- | --- | --- |
-| `@moris/opencode-plugin` | `packages/opencode-plugin` | 在 OpenCode v2 中注册唯一的 `moris` provider，同步 `/api/catalog` |
-| `@moris/openchamber-plugin` | `packages/openchamber-plugin` | 在 OpenChamber Work Status 中显示余额、额度窗口与美元估算 |
+| `@moris/opencode-plugin` | `packages/opencode-plugin`（独立仓库 `Adsicmes/moris-opencode-plugin`） | 在 OpenCode v2 中注册唯一的 `moris` provider，同步 `/api/catalog` |
+| `@moris/openchamber-plugin` | `packages/openchamber-plugin`（独立仓库 `Adsicmes/moris-openchamber-plugin`） | 在 OpenChamber Work Status 中显示余额、额度窗口与美元估算 |
+
+主仓库中的这两个目录是 Git submodule，分别指向上面的独立仓库；构建后的 `build/` 随仓库提交，直接从 GitHub 安装时不需要再构建。
 
 核对依据（2026-11-13）：
 
@@ -28,7 +30,7 @@
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "@moris/opencode-plugin",
+      "package": "github:Adsicmes/moris-opencode-plugin#main",
       "options": {
         "baseUrl": "https://gateway.example.com",
         "apiKey": "设备密钥"
@@ -37,6 +39,8 @@
   ]
 }
 ```
+
+也可以先执行 `opencode plugin add 'github:Adsicmes/moris-opencode-plugin#main'`，再给生成的条目补上两个 options。若之后发布到 npm，`package` 可改回包名。
 
 插件只读取 options（真实 V2 ctx：`ctx.options`）：
 
@@ -136,12 +140,17 @@ OpenCode 运行时 `Model.Cost` 的四个数（input/output/cache.read/cache.wri
 
 ### 2.2 构建与安装
 
+两种安装方式：
+
+- 从 GitHub 安装：在 OpenChamber 的 Settings → Extensions 填 `https://github.com/Adsicmes/moris-openchamber-plugin`，或打开 `openchamber://extensions/install?url=https://github.com/Adsicmes/moris-openchamber-plugin`；
+- 本地目录：把 `packages/openchamber-plugin`（一个 Git submodule）直接交给 Settings → Extensions。
+
 ```bash
 npm install
 npm run build --workspace=@moris/openchamber-plugin   # tsc -> build/service/*.js
 ```
 
-包内已提交构建后的 `build/service/*.js`，因此也可以直接把文件夹（或 zip：`package.json` + `build/`）交给 OpenChamber 的 Settings → Extensions。安装后需要批准扩展并允许其本地 service；service 首次被读取时由宿主启动，空闲 10 分钟后由宿主停止。
+包内已提交构建后的 `build/service/*.js`，因此 GitHub 安装或直接给文件夹（或 zip：`package.json` + `build/`）都不需要先构建。安装后需要批准扩展并允许其本地 service；service 首次被读取时由宿主启动，空闲 10 分钟后由宿主停止。
 
 Service 契约（GUEST_SERVICES）：
 
