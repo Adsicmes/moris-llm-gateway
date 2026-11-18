@@ -216,11 +216,15 @@ test('OpenCode: each protocol selects its own runtime package', () => {
   assert.equal(unknown.enabled, false, 'an unknown protocol must not be routed as chat');
 });
 
-test('OpenCode: provider info disables WebSocket and keeps the key off the provider object', () => {
+test('OpenCode: provider info disables WebSocket, skips credential resolution and keeps the key off the provider object', () => {
   const info = providerInfo({ apiBase: 'https://gateway.example.com/v1', headerTimeoutMs: 1, chunkTimeoutMs: 2, requestTimeoutMs: 3 });
   assert.equal(info.id, 'moris');
   assert.equal(info.settings.transport, 'http');
   assert.equal(info.settings.baseURL, 'https://gateway.example.com/v1');
+  // `false` is what keeps the responses-protocol models usable: OpenCode only
+  // drops its credential requirement on its own for allowlisted packages, and
+  // `openai-compatible/responses` is not listed.
+  assert.equal(info.settings.apiKey, false);
   assert.equal(JSON.stringify(info).includes('device-secret'), false);
 });
 
